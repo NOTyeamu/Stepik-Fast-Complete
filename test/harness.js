@@ -11,6 +11,10 @@
 const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
+const JSZip = require('jszip');
+
+/* крошечный настоящий PNG — вместо скриншота */
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
 
 const SCRIPT = fs.readFileSync(path.join(__dirname, '..', 'stepik-gist-sync.user.js'), 'utf8');
 
@@ -89,7 +93,7 @@ function makeFetch(state) {
   };
 }
 
-function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, waitMs, afterRun }) {
+function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, waitMs, afterRun }) {
   return new Promise((resolve, reject) => {
     const dom = new JSDOM(html, { url, runScripts: 'dangerously', pretendToBeVisual: true });
     const { window } = dom;
@@ -97,8 +101,23 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       calls: [], inbox: {}, inboxMessages: [], menu: {},
       store: Object.assign({}, store || {}), submissions: submissions || [],
       storeDown: !!storeDown, emptyLessonSteps: !!emptyLessonSteps,
-      setValue: null, storage: { writeToken: token === undefined ? 'github_pat_11TEST' : token }
+      setValue: null, submitted: 0, docBlob: null, shots: 0,
+      storage: { writeToken: token === undefined ? 'github_pat_11TEST' : token }
     };
+    if (job) state.storage.job = JSON.stringify(job);
+    if (innerWidth) Object.defineProperty(window, 'innerWidth', { value: innerWidth, configurable: true });
+
+    /* скриншот: html2canvas подменяем, реального рендера в jsdom нет */
+    window.html2canvas = function () {
+      state.shots++;
+      return Promise.resolve({
+        width: 1400, height: 600,
+        toDataURL: () => 'data:image/png;base64,' + PNG
+      });
+    };
+    /* ссылку на файл перехватываем, чтобы достать собранный .docx */
+    window.URL.createObjectURL = function (blob) { state.docBlob = blob; return 'blob:test'; };
+    window.URL.revokeObjectURL = function () {};
 
     window.Element.prototype.getBoundingClientRect = function () {
       return { width: 600, height: 200, top: 100, left: 50, right: 650, bottom: 300, x: 50, y: 100 };
@@ -107,6 +126,9 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
 
     const cmNode = window.document.querySelector('.CodeMirror');
     if (cmNode) {
+      const submitBtn = window.document.querySelector('button.submit');
+      if (submitBtn) submitBtn.addEventListener('click', () => { state.submitted++; });
+
       cmNode.CodeMirror = {
         getValue: () => (state.setValue == null ? '' : state.setValue),
         setValue: (v) => { state.setValue = v; },
@@ -120,6 +142,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       'GM_getValue', 'GM_setValue', 'GM_addStyle', 'GM_registerMenuCommand',
       'CustomEvent', 'Event', 'KeyboardEvent', 'MouseEvent',
       'HTMLTextAreaElement', 'HTMLInputElement', 'TextEncoder', 'btoa',
+      'html2canvas', 'JSZip', 'URL',
       'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
       SCRIPT
     );
@@ -132,6 +155,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       () => {}, (name, fn) => { state.menu[name] = fn; },
       window.CustomEvent, window.Event, window.KeyboardEvent, window.MouseEvent,
       window.HTMLTextAreaElement, window.HTMLInputElement, TextEncoder, btoa,
+      window.html2canvas, JSZip, window.URL,
       (f, ms) => { const t = setTimeout(f, ms); timers.push(t); return t; },
       clearTimeout,
       (f, ms) => { const t = setInterval(f, ms); timers.push(t); return t; },
@@ -152,6 +176,14 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
 const HTML = `<!doctype html><html><body>
   <div class="attempt-wrapper"><div class="attempt-wrapper__content">
     <div class="CodeMirror"><textarea></textarea></div>
+  </div></div>
+</body></html>`;
+
+const JOB_HTML = `<!doctype html><html><body>
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="step-text">Напишите программу, которая выводит число</div>
+    <div class="CodeMirror"><textarea></textarea></div>
+    <button class="submit">Отправить</button>
   </div></div>
 </body></html>`;
 
@@ -317,6 +349,84 @@ const CHOICE_HTML = `<!doctype html><html><body>
         Object.keys(st.inbox).join(','));
     }
   });
+
+  console.log('\n=== 10. панель «от и до» появилась ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: HTML, waitMs: 2000,
+    afterRun: async (win) => {
+      const fab = win.document.querySelector('#sgx-fab');
+      const panel = win.document.querySelector('#sgx-panel');
+      check('кнопка «от и до» есть', !!fab, fab && fab.textContent);
+      check('панель есть', !!panel);
+      check('есть поле «с шага»', !!win.document.querySelector('#sgx-from'));
+      check('есть кнопка «Пройти»', /Пройти/.test(win.document.querySelector('#sgx-solve').textContent));
+      check('есть кнопка «Собрать в Word»', /Word/.test(win.document.querySelector('#sgx-collect').textContent));
+      fab.click();
+      check('панель открывается', panel.classList.contains('on'));
+      check('шаг подставился автоматически', win.document.querySelector('#sgx-from').value === '8',
+        win.document.querySelector('#sgx-from').value);
+    }
+  });
+
+  console.log('\n=== 11. скоба переезжает наверх, если справа нет места ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: { l1793281_s8: { file: 'l1793281_s8.cs', ext: 'cs', kind: 'code', content: 'int x = 1;' } },
+    submissions: [], html: HTML, innerWidth: 400, waitMs: 2000,
+    afterRun: async (win) => {
+      const chip = win.document.querySelector('#sgx-chip');
+      check('скоба показана', chip && chip.classList.contains('on'));
+      check('режим «сверху»', chip.classList.contains('above'), chip.className);
+      check('спрятана вертикальная скоба', chip.style.height === 'auto', chip.style.height);
+    }
+  });
+
+  console.log('\n=== 12. «пройти от и до»: вставил и отправил ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: { l1793281_s8: { file: 'l1793281_s8.cs', ext: 'cs', kind: 'code', content: 'int x = 42;' } },
+    submissions: [], html: JOB_HTML, waitMs: 6500,
+    job: { kind: 'solve', lesson: String(LESSON), from: 8, to: 8, at: 8, shots: [] },
+    afterRun: async (win, st) => {
+      check('ответ вставлен в редактор', st.setValue === 'int x = 42;', JSON.stringify(st.setValue));
+      const btn = win.document.querySelector('button.submit');
+      check('задание отправлено', st.submitted === 1, 'кликов: ' + st.submitted);
+      check('обход завершён', JSON.parse(st.storage.job || 'null') === null, st.storage.job);
+      check('статус говорит «готово»', /готово/.test(win.document.querySelector('#sgx-status').textContent),
+        win.document.querySelector('#sgx-status').textContent);
+    }
+  });
+
+  console.log('\n=== 13. «собрать в Word»: скриншот → .docx ===');
+  const docState = await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/9?unit=1818966`,
+    store: {}, submissions: [], html: JOB_HTML, waitMs: 6500,
+    job: { kind: 'collect', lesson: String(LESSON), from: 9, to: 9, at: 9, shots: [] },
+    afterRun: async (win, st) => {
+      check('скриншот снят', st.shots === 1, st.shots);
+      check('документ собран', !!st.docBlob, String(st.docBlob));
+      check('обход завершён', JSON.parse(st.storage.job || 'null') === null);
+      check('статус про документ', /документ|скриншот/.test(win.document.querySelector('#sgx-status').textContent),
+        win.document.querySelector('#sgx-status').textContent);
+    }
+  });
+
+  if (docState.docBlob) {
+    const buf = Buffer.from(await docState.docBlob.arrayBuffer());
+    const zip = await JSZip.loadAsync(buf);
+    const names = Object.keys(zip.files).sort();
+    check('в .docx есть [Content_Types].xml', names.includes('[Content_Types].xml'), names.join(', '));
+    check('в .docx есть _rels/.rels', names.includes('_rels/.rels'));
+    check('в .docx есть word/document.xml', names.includes('word/document.xml'));
+    check('в .docx есть картинка', names.some((n) => /^word\/media\/image\d+\.png$/.test(n)), names.join(', '));
+    const doc = await zip.file('word/document.xml').async('string');
+    check('в документе есть рисунок', /<w:drawing>/.test(doc) && /r:embed="rId1"/.test(doc));
+    check('в документе есть заголовок шага', /Шаг 9/.test(doc), doc.slice(0, 200));
+    const rels = await zip.file('word/_rels/document.xml.rels').async('string');
+    check('связь с картинкой прописана', /Target="media\/image1\.png"/.test(rels), rels);
+    check('размер файла разумный', buf.length > 500, buf.length + ' байт');
+  }
 
   const failed = results.filter((r) => !r.ok);
   console.log('\n=== ИТОГ: ' + (results.length - failed.length) + '/' + results.length + ' проверок пройдено ===');

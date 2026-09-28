@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      5.0.1
+// @version      5.1.0
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет».
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -12,6 +12,8 @@
 // @grant        GM_setValue
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
+// @require      https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js
+// @require      https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js
 // @run-at       document-idle
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/NOTyeamu/Stepik-Fast-Complete/main/stepik-gist-sync.user.js
@@ -49,7 +51,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '5.0.1';
+  var VERSION = '5.1.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -654,37 +656,64 @@
   /* -------------------------------------------------------------------- UI */
 
   GM_addStyle([
+    /* --- скоба «вставить»: контрастная, чтобы её было видно --- */
     '#sgx-chip{position:fixed;z-index:2147483000;display:none;align-items:stretch;pointer-events:none;',
-    'font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;white-space:nowrap}',
+    'font:13.5px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
     '#sgx-chip.on{display:flex}',
     '#sgx-chip .sgx-brace{flex:none;display:block;overflow:visible}',
-    '#sgx-chip.flat .sgx-brace{display:none}',
-    '#sgx-chip .sgx-body{display:flex;flex-direction:column;justify-content:center;gap:1px;padding-left:8px;pointer-events:auto}',
-    '#sgx-chip .sgx-label{color:#7D7A75}',
-    '#sgx-chip .sgx-acts{display:flex;align-items:center;gap:6px}',
+    '#sgx-chip.above .sgx-brace{display:none}',
+    '#sgx-chip .sgx-body{display:flex;flex-direction:column;justify-content:center;gap:6px;padding:8px 12px;',
+    'pointer-events:auto;background:#FFFFFF;border:1.5px solid #2F7CE0;border-radius:10px;',
+    'box-shadow:0 3px 12px rgba(47,124,224,.25),0 1px 2px rgba(0,0,0,.10)}',
+    '#sgx-chip .sgx-label{color:#1F1D1B;font-weight:700}',
+    '#sgx-chip .sgx-acts{display:flex;align-items:center;gap:8px}',
     '#sgx-chip .sgx-sep{color:#C9C7C4}',
-    '#sgx-chip .sgx-act{border:0;background:none;padding:0;margin:0;cursor:pointer;font:inherit;font-weight:600;color:#2783DE}',
-    '#sgx-chip .sgx-act:hover{text-decoration:underline}',
-    '#sgx-chip .sgx-act.no{color:#9B9894;font-weight:500}',
+    '#sgx-chip .sgx-act{border:0;border-radius:7px;padding:5px 11px;cursor:pointer;',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px;font-weight:600;line-height:1.2;background:#2F7CE0;color:#fff}',
+    '#sgx-chip .sgx-act:hover{background:#2769C4}',
+    '#sgx-chip .sgx-act.no{background:#EEF1F5;color:#3B3936}',
+    '#sgx-chip .sgx-act.no:hover{background:#E1E7EE}',
+    /* --- вспышка вокруг редактора и тост --- */
     '.sgx-flash{position:fixed;z-index:2147482000;pointer-events:none;border-radius:6px;opacity:1;',
     'background:rgba(56,178,113,.28);box-shadow:inset 0 0 0 2px rgba(56,178,113,.5);transition:opacity .4s ease}',
     '.sgx-flash.off{opacity:0}',
     '#sgx-toast{position:fixed;right:16px;bottom:16px;z-index:2147483000;display:none;max-width:320px;',
     'padding:9px 12px;border-radius:8px;border:1px solid #E6E5E3;background:#FFF;color:#2C2C2B;',
-    'font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;',
-    'box-shadow:0 1px 2px rgba(0,0,0,.05),0 4px 12px rgba(0,0,0,.06)}',
+    'font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;box-shadow:0 1px 2px rgba(0,0,0,.05),0 4px 12px rgba(0,0,0,.06)}',
     '#sgx-toast.on{display:block}',
     '#sgx-toast.err{background:#FCE9E7;border-color:#F3C8C3;color:#b23f34}',
+    /* --- отчёт самопроверки --- */
     '#sgx-report{position:fixed;inset:0;z-index:2147483647;background:rgba(15,15,14,.45);display:flex;',
-    'align-items:center;justify-content:center;font:13px/1.5 ui-sans-serif,system-ui,sans-serif}',
+    'align-items:center;justify-content:center;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
     '#sgx-report .sgx-rep-box{background:#fff;border-radius:10px;box-shadow:0 18px 48px rgba(15,15,14,.25);',
     'padding:14px;width:min(620px,92vw);display:flex;flex-direction:column;gap:10px}',
     '#sgx-report textarea{width:100%;height:320px;resize:vertical;border:1px solid #E3E2E0;border-radius:6px;',
     'padding:10px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#37352F;background:#FBFBFA}',
     '#sgx-report .sgx-rep-row{display:flex;gap:8px;justify-content:flex-end}',
     '#sgx-report button{border:1px solid #E3E2E0;background:#fff;border-radius:6px;padding:6px 12px;',
-    'font:13px/1 ui-sans-serif,system-ui,sans-serif;color:#37352F;cursor:pointer}',
-    '#sgx-report button:hover{background:#F1F1EF}'
+    'font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#37352F;cursor:pointer}',
+    '#sgx-report button:hover{background:#F1F1EF}',
+    /* --- панель «от и до» --- */
+    '#sgx-fab{position:fixed;left:16px;bottom:16px;z-index:2147482000;padding:10px 15px;border-radius:11px;',
+    'background:#2F7CE0;color:#fff;font:700 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;cursor:pointer;user-select:none;',
+    'box-shadow:0 4px 12px rgba(0,0,0,.28)}',
+    '#sgx-fab:hover{background:#2769C4}',
+    '#sgx-fab.busy{background:#E07B2F}',
+    '#sgx-panel{position:fixed;left:16px;bottom:66px;z-index:2147482000;display:none;width:344px;padding:14px;',
+    'border-radius:12px;background:#fff;border:1px solid #DCDAD7;box-shadow:0 12px 32px rgba(0,0,0,.22);',
+    'font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1F1D1B}',
+    '#sgx-panel.on{display:block}',
+    '#sgx-panel h4{margin:0 0 10px;font-size:14px;color:#1F1D1B}',
+    '#sgx-panel .row{display:flex;align-items:center;gap:8px;margin-bottom:8px}',
+    '#sgx-panel input[type=number]{width:66px;padding:6px 8px;border:1px solid #D5D3D0;border-radius:7px;',
+    'font:inherit;color:inherit;background:#fff}',
+    '#sgx-panel button{flex:1;padding:9px 10px;border:0;border-radius:8px;cursor:pointer;',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px;font-weight:600;line-height:1.2;background:#2F7CE0;color:#fff}',
+    '#sgx-panel button.sec{background:#EEF2F7;color:#1F1D1B}',
+    '#sgx-panel button.danger{background:#E05A4A;color:#fff}',
+    '#sgx-panel button:disabled{opacity:.45;cursor:default}',
+    '#sgx-status{margin:2px 0 8px;color:#5C5854;min-height:18px}',
+    '#sgx-panel #sgx-total{color:#8A8783;font-size:12px}'
   ].join(''));
 
   var chip = null, chipAnchor = null, toastEl = null, toastTimer = null;
@@ -712,7 +741,7 @@
     chip.id = 'sgx-chip';
     chip.innerHTML = [
       '<svg class="sgx-brace" xmlns="http://www.w3.org/2000/svg" width="' + BRACE_W + '" height="100" aria-hidden="true">',
-      '<path fill="none" stroke="#C7C5C1" stroke-width="1.6" stroke-linecap="round" d=""></path>',
+      '<path fill="none" stroke="#8FA6BF" stroke-width="2.4" stroke-linecap="round" d=""></path>',
       '</svg>',
       '<div class="sgx-body">',
       '<span class="sgx-label">есть решение</span>',
@@ -743,28 +772,34 @@
     if (!r.width && !r.height) { chip.classList.remove('on'); return; }
 
     var body = chip.querySelector('.sgx-body');
-    var bodyW = (body && body.offsetWidth) || 120;
-    var flat = (window.innerWidth - r.right - 14) < (bodyW + BRACE_W + 8);
-    chip.classList.toggle('flat', flat);
+    var bodyW = (body && body.offsetWidth) || 150;
+    var spaceRight = window.innerWidth - r.right - 14;
 
-    if (!flat) {
-      var h = Math.max(48, r.height);
-      var svg = chip.querySelector('.sgx-brace');
-      if (svg) {
-        svg.setAttribute('height', String(Math.round(h)));
-        svg.style.height = Math.round(h) + 'px';
-        var path = svg.querySelector('path');
-        if (path) path.setAttribute('d', bracePath(h, BRACE_W));
-      }
-      chip.style.height = Math.round(h) + 'px';
-      chip.style.left = Math.round(r.right + 12) + 'px';
-      chip.style.top = Math.round(r.top) + 'px';
+    /* справа не помещается — показываем полоску прямо над карточкой */
+    if (spaceRight < bodyW + BRACE_W + 8) {
+      chip.classList.add('above');
+      chip.style.height = 'auto';
+      var hAbove = (body && body.offsetHeight) || 66;
+      var wAbove = chip.offsetWidth || bodyW;
+      var top = r.top - hAbove - 10;
+      if (top < 8) top = Math.min(window.innerHeight - hAbove - 10, r.bottom + 10);
+      chip.style.left = Math.round(Math.max(8, Math.min(window.innerWidth - wAbove - 10, r.left))) + 'px';
+      chip.style.top = Math.round(Math.max(8, top)) + 'px';
       return;
     }
-    chip.style.height = 'auto';
-    var w = chip.offsetWidth || bodyW;
-    chip.style.left = Math.round(Math.max(8, Math.min(window.innerWidth - w - 10, r.right - w))) + 'px';
-    chip.style.top = Math.round(Math.max(8, r.top - 34)) + 'px';
+
+    chip.classList.remove('above');
+    var h = Math.max(56, r.height);
+    var svg = chip.querySelector('.sgx-brace');
+    if (svg) {
+      svg.setAttribute('height', String(Math.round(h)));
+      svg.style.height = Math.round(h) + 'px';
+      var path = svg.querySelector('path');
+      if (path) path.setAttribute('d', bracePath(h, BRACE_W));
+    }
+    chip.style.height = Math.round(h) + 'px';
+    chip.style.left = Math.round(r.right + 12) + 'px';
+    chip.style.top = Math.round(r.top) + 'px';
   }
 
   function showChip(target, label) {
@@ -855,6 +890,407 @@
     return { lesson: m[1], step: +m[2], key: 'l' + m[1] + '_s' + m[2] };
   }
 
+  /* ==================================================== панель «от и до» */
+
+  /* Пройти пачку заданий: вставить сохранённые ответы и отправить.
+     Собрать пачку в Word: снять скриншоты заданий (с кодом) и сложить в .docx.
+     Обход живёт в GM-хранилище и переживает перезагрузку страницы: скрипт
+     переходит на следующий шаг обычной навигацией и продолжает там. */
+
+  var JOB_KEY = 'job';
+  var job = null;
+  try { job = JSON.parse(GM_getValue(JOB_KEY, 'null')); } catch (e) { job = null; }
+  var jobBusy = false;
+  var lastDocUrl = '';
+
+  function saveJob() {
+    try { GM_setValue(JOB_KEY, JSON.stringify(job)); } catch (e) { log('не сохранил задание:', e.message); }
+  }
+
+  function jobStep() { return job ? job.at : null; }
+
+  function setStatus(text) {
+    var el = document.getElementById('sgx-status');
+    if (el) el.textContent = text || '';
+    var fab = document.getElementById('sgx-fab');
+    if (fab) {
+      var busy = !!job;
+      fab.textContent = busy ? ('иду: шаг ' + job.at + ' из ' + job.to) : 'от и до';
+      fab.classList.toggle('busy', busy);
+    }
+  }
+
+  function startJob(kind, lesson, from, to) {
+    job = { kind: kind, lesson: String(lesson), from: from, to: to, at: from, shots: [] };
+    saveJob();
+    renderPanel();
+    setStatus(kind === 'solve' ? 'пошёл по заданиям' : 'собираю скриншоты');
+    setTimeout(tick, 0);
+  }
+
+  function stopJob(message) {
+    job = null;
+    saveJob();
+    renderPanel();
+    setStatus(message || 'остановлено');
+  }
+
+  function goToStep(lesson, step) {
+    var url = '/lesson/' + lesson + '/step/' + step + (location.search || '');
+    if (new RegExp('/step/' + step + '(\\?|$)').test(location.pathname + location.search)) return;
+    try { location.href = url; } catch (e) { log('перейти не удалось:', e.message); }
+  }
+
+  async function runJob(ctx) {
+    if (!job || jobBusy) return;
+    if (String(job.lesson) !== String(ctx.lesson)) return;
+    if (ctx.step !== job.at) { goToStep(job.lesson, job.at); return; }
+
+    jobBusy = true;
+    try {
+      if (job.kind === 'solve') await jobSolve(ctx);
+      else await jobCollect(ctx);
+    } catch (e) {
+      setStatus('ошибка на шаге ' + job.at + ': ' + e.message);
+      await sleep(1500);
+      nextJobStep();
+    } finally {
+      jobBusy = false;
+    }
+  }
+
+  function nextJobStep() {
+    if (!job) return;
+    if (job.at >= job.to) {
+      if (job.kind === 'collect') return finishCollect();
+      return stopJob('готово: прошёл шаги ' + job.from + '–' + job.to);
+    }
+    job.at++;
+    saveJob();
+    goToStep(job.lesson, job.at);
+  }
+
+  var SUBMIT_RE = /^(отправить|решить|проверить|submit|send)$/i;
+
+  function submitButton() {
+    var nodes = $$('button, [role="button"]');
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].disabled) continue;
+      if (!SUBMIT_RE.test(norm(nodes[i].textContent))) continue;
+      var r = nodes[i].getBoundingClientRect();
+      if (r.width && r.height) return nodes[i];
+    }
+    return null;
+  }
+
+  async function jobSolve(ctx) {
+    setStatus('шаг ' + job.at + ' из ' + job.to + ': вставляю ответ');
+    var res;
+    try {
+      res = await insertSaved(ctx);
+    } catch (e) {
+      setStatus('шаг ' + job.at + ': ' + e.message + ' — пропускаю');
+      await sleep(1500);
+      return nextJobStep();
+    }
+    await sleep(500);
+    var btn = submitButton();
+    if (!btn) {
+      setStatus('шаг ' + job.at + ': ответ вставил, но кнопки «Отправить» нет — пропускаю');
+      await sleep(1500);
+      return nextJobStep();
+    }
+    btn.click();
+    setStatus('шаг ' + job.at + ' из ' + job.to + ': отправлено');
+    await sleep(2500);
+    return nextJobStep();
+  }
+
+  async function jobCollect(ctx) {
+    setStatus('шаг ' + job.at + ' из ' + job.to + ': снимаю скриншот');
+    var shot = await shootStep(ctx);
+    if (shot) {
+      job.shots.push({ step: ctx.step, title: stepTitle(ctx), img: shot.img, w: shot.w, h: shot.h });
+      try { saveJob(); } catch (e) { log(e); }
+    } else {
+      setStatus('шаг ' + job.at + ': скриншот не получился — пропускаю');
+      await sleep(1000);
+    }
+    return nextJobStep();
+  }
+
+  /* ------------------------------------------------------------- скриншот */
+
+  function stepTitle(ctx) {
+    var card = $('.attempt-wrapper__content') || document.body;
+    var head = '';
+    var nodes = $$('.step-text, .problem__header, .attempt-wrapper__content h1, .text, .step-title', card);
+    for (var i = 0; i < nodes.length; i++) {
+      var t = norm(nodes[i].textContent);
+      if (t.length > 3) { head = t.slice(0, 90); break; }
+    }
+    return 'Шаг ' + ctx.step + (head ? '. ' + head : '');
+  }
+
+  async function shootStep(ctx) {
+    if (typeof html2canvas !== 'function') {
+      log('html2canvas не загрузился — соберу документ без скриншотов');
+      return null;
+    }
+    var target = insertTarget();
+    var card = (target && cardOf(target.anchor)) || $('.attempt-wrapper__content') || document.body;
+    var rect = card.getBoundingClientRect();
+    if (rect.height < 40) return null;
+
+    var canvas;
+    try {
+      canvas = await html2canvas(card, {
+        backgroundColor: '#ffffff',
+        scale: Math.min(2, window.devicePixelRatio || 1),
+        useCORS: true,
+        logging: false,
+        scrollX: 0,
+        scrollY: -window.scrollY,
+        windowWidth: document.documentElement.clientWidth
+      });
+    } catch (e) {
+      log('html2canvas упал:', e.message);
+      return null;
+    }
+    if (!canvas || !canvas.width) return null;
+
+    /* ужимаем до 1100 px по ширине, чтобы документ не раздувался;
+       если ужать не получилось — берём скриншот как есть, он важнее размера */
+    var maxW = 1100;
+    var out = canvas;
+    if (canvas.width > maxW) {
+      try {
+        var scale = maxW / canvas.width;
+        var c2 = document.createElement('canvas');
+        c2.width = maxW;
+        c2.height = Math.round(canvas.height * scale);
+        var ctx2 = c2.getContext('2d');
+        ctx2.fillStyle = '#ffffff';
+        ctx2.fillRect(0, 0, c2.width, c2.height);
+        ctx2.drawImage(canvas, 0, 0, c2.width, c2.height);
+        out = c2;
+      } catch (e) {
+        log('ужать скриншот не вышло, беру как есть:', e.message);
+        out = canvas;
+      }
+    }
+    return { img: out.toDataURL('image/png'), w: out.width, h: out.height };
+  }
+
+  /* ---------------------------------------------------------- документ .docx */
+
+  var XML_ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return XML_ESC[c]; }); }
+
+  var DOCX_CONTENT_TYPES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Default Extension="png" ContentType="image/png"/>' +
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    '</Types>';
+
+  var DOCX_ROOT_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+    '</Relationships>';
+
+  var DOCX_W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ' +
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+    'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
+
+  function docxParagraph(text, opts) {
+    opts = opts || {};
+    var run = '<w:rPr>' +
+      (opts.bold ? '<w:b/>' : '') +
+      (opts.mono ? '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/><w:sz w:val="18"/>' : '') +
+      (opts.size ? '<w:sz w:val="' + opts.size + '"/>' : '') +
+      '</w:rPr>';
+    return '<w:p><w:pPr>' + (opts.spacing ? '<w:spacing w:before="' + opts.spacing + '"/>' : '') + '</w:pPr>' +
+      '<w:r>' + run + '<w:t xml:space="preserve">' + esc(text) + '</w:t></w:r></w:p>';
+  }
+
+  function docxImage(rid, id, w, h) {
+    var maxW = 5943600;                       /* ~16.5 см: ширина полосы набора A4 */
+    var cx = Math.round(w * 9525), cy = Math.round(h * 9525);
+    if (cx > maxW) { cy = Math.round(cy * maxW / cx); cx = maxW; }
+    return '<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">' +
+      '<wp:extent cx="' + cx + '" cy="' + cy + '"/>' +
+      '<wp:docPr id="' + id + '" name="image' + id + '"/>' +
+      '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+      '<pic:pic><pic:nvPicPr><pic:cNvPr id="' + id + '" name="image' + id + '.png"/><pic:cNvPicPr/></pic:nvPicPr>' +
+      '<pic:blipFill><a:blip r:embed="' + rid + '"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>' +
+      '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + cx + '" cy="' + cy + '"/></a:xfrm>' +
+      '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
+      '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>';
+  }
+
+  function buildDocx(shots, title) {
+    if (typeof JSZip !== 'function') throw new Error('библиотека для .docx не загрузилась');
+    var zip = new JSZip();
+    var word = zip.folder('word');
+    var media = word.folder('media');
+    var rels = [];
+    var body = [docxParagraph(title || 'Задания Stepik', { bold: true, size: '32', spacing: '0' })];
+    body.push(docxParagraph('Собрано скриптом Stepik ⇄ Ответы · ' + nowIso().slice(0, 16).replace('T', ' ')));
+
+    var n = 0;
+    (shots || []).forEach(function (s) {
+      var m = /^data:image\/png;base64,(.+)$/.exec(s.img || '');
+      if (!m) return;
+      n++;
+      var name = 'image' + n + '.png';
+      media.file(name, m[1], { base64: true });
+      var rid = 'rId' + n;
+      rels.push('<Relationship Id="' + rid + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/' + name + '"/>');
+      body.push(docxParagraph(s.title || ('Шаг ' + s.step), { bold: true, spacing: '240' }));
+      body.push(docxImage(rid, n, s.w || 1000, s.h || 600));
+    });
+    if (!n) body.push(docxParagraph('Скриншоты не получились — библиотека html2canvas не загрузилась.'));
+
+    zip.file('[Content_Types].xml', DOCX_CONTENT_TYPES);
+    zip.file('_rels/.rels', DOCX_ROOT_RELS);
+    word.file('_rels/document.xml.rels',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      rels.join('') + '</Relationships>');
+    word.file('document.xml',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ' + DOCX_W_NS + '><w:body>' +
+      body.join('') +
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:pgMar w:top="850" w:right="850" w:bottom="850" w:left="850"/></w:sectPr>' +
+      '</w:body></w:document>');
+
+    return zip.generateAsync({
+      type: 'blob',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    });
+  }
+
+  function downloadBlob(blob, name) {
+    try {
+      if (lastDocUrl) URL.revokeObjectURL(lastDocUrl);
+      lastDocUrl = URL.createObjectURL(blob);
+    } catch (e) {
+      log('не создал ссылку на файл:', e.message);
+      return;
+    }
+    var a = document.createElement('a');
+    a.href = lastDocUrl;
+    a.download = name;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { a.remove(); }, 2000);
+  }
+
+  async function finishCollect() {
+    var shots = (job && job.shots) || [];
+    var name = 'stepik-задания-' + (job ? job.lesson + '-шаги-' + job.from + '-' + job.to : 'сборка') + '.docx';
+    setStatus('собираю документ (' + shots.length + ' скриншотов)');
+    try {
+      var blob = await buildDocx(shots, 'Задания Stepik · урок ' + (job ? job.lesson : '') +
+        ', шаги ' + (job ? job.from + '–' + job.to : ''));
+      stopJob('готово: ' + shots.length + ' скриншотов, документ скачивается');
+      downloadBlob(blob, name);
+      renderPanel(true);
+    } catch (e) {
+      stopJob('не собрал документ: ' + e.message);
+    }
+  }
+
+  /* --------------------------------------------------------------- панель */
+
+  function renderPanel(keepStatus) {
+    var panel = document.getElementById('sgx-panel');
+    if (!panel) return;
+    var from = document.getElementById('sgx-from');
+    var to = document.getElementById('sgx-to');
+    var ctx = stepContext();
+    var total = ctx && stepIds[ctx.lesson] ? stepIds[ctx.lesson].length : 0;
+
+    if (ctx && document.activeElement !== from && document.activeElement !== to) {
+      if (!from.value) from.value = ctx.step;
+      if (!to.value) to.value = total ? Math.min(total, ctx.step + 4) : ctx.step;
+    }
+    document.getElementById('sgx-total').textContent = total ? 'в уроке ' + total : '';
+
+    var solving = !!job;
+    document.getElementById('sgx-solve').disabled = solving;
+    document.getElementById('sgx-collect').disabled = solving;
+    document.getElementById('sgx-stop').disabled = !solving;
+    document.getElementById('sgx-open').style.display =
+      (job && job.shots && job.shots.length) ? 'block' : 'none';
+    if (!keepStatus && !solving) setStatus('');
+  }
+
+  function ensurePanel() {
+    if (document.getElementById('sgx-fab')) return;
+    var fab = document.createElement('div');
+    fab.id = 'sgx-fab';
+    fab.textContent = 'от и до';
+    fab.title = 'Пройти пачку заданий или собрать их в Word';
+    document.body.appendChild(fab);
+
+    var panel = document.createElement('div');
+    panel.id = 'sgx-panel';
+    panel.innerHTML = [
+      '<h4>Пройти задания</h4>',
+      '<div class="row">с шага <input type="number" id="sgx-from" min="1"> по',
+      ' <input type="number" id="sgx-to" min="1"> <span id="sgx-total"></span></div>',
+      '<div class="row"><button id="sgx-solve">Пройти: вставить и отправить</button></div>',
+      '<div class="row"><button id="sgx-collect" class="sec">Собрать в Word со скринами</button></div>',
+      '<div id="sgx-status"></div>',
+      '<div class="row"><button id="sgx-open" class="sec">Скачать Word ещё раз</button></div>',
+      '<div class="row"><button id="sgx-stop" class="danger">Остановить</button></div>'
+    ].join('');
+    document.body.appendChild(panel);
+
+    fab.addEventListener('click', function () {
+      panel.classList.toggle('on');
+      renderPanel();
+    });
+    document.getElementById('sgx-solve').addEventListener('click', function () { beginJob('solve'); });
+    document.getElementById('sgx-collect').addEventListener('click', function () { beginJob('collect'); });
+    document.getElementById('sgx-stop').addEventListener('click', function () { stopJob('остановлено'); });
+    document.getElementById('sgx-open').addEventListener('click', function () { redownload(); });
+    renderPanel();
+  }
+
+  function range() {
+    var from = parseInt(document.getElementById('sgx-from').value, 10);
+    var to = parseInt(document.getElementById('sgx-to').value, 10);
+    if (!from || from < 1) throw new Error('укажи номер первого шага');
+    if (!to || to < from) throw new Error('последний шаг должен быть не меньше первого');
+    return { from: from, to: Math.min(to, from + 200) };
+  }
+
+  function beginJob(kind) {
+    var ctx = stepContext();
+    if (!ctx) { setStatus('открой урок: stepik.org/lesson/<урок>/step/<номер>'); return; }
+    var r;
+    try { r = range(); } catch (e) { setStatus(e.message); return; }
+    if (kind === 'solve' && !cfg.token) { setStatus('нужен токен записи — меню → ⚙ Токен записи'); return; }
+    startJob(kind, ctx.lesson, r.from, r.to);
+  }
+
+  async function redownload() {
+    if (!job || !job.shots || !job.shots.length) { setStatus('скриншотов пока нет'); return; }
+    try {
+      var blob = await buildDocx(job.shots, 'Задания Stepik · урок ' + job.lesson +
+        ', шаги ' + job.from + '–' + job.to);
+      downloadBlob(blob, 'stepik-задания-' + job.lesson + '-шаги-' + job.from + '-' + job.to + '.docx');
+      setStatus('документ скачивается');
+    } catch (e) { setStatus('не собрал документ: ' + e.message); }
+  }
+
   /* ------------------------------------------------------------ главный цикл */
 
   var busy = false, tried = {}, dismissed = {}, currentKey = null;
@@ -909,6 +1345,9 @@
         storeIndex(true).catch(function (e) { log('список не обновился:', e.message); });
       }
     }
+
+    /* идёт обход заданий — скоба и автопостинг на это время не нужны */
+    if (job) { hideChip(); runJob(ctx); return; }
 
     var entry = cacheIndex()[ctx.key];
     if (entry && !dismissed[ctx.key]) {
@@ -1105,6 +1544,12 @@
       selfTest().catch(function (err) { toast('⚠ ' + err.message, true); });
     });
 
+    GM_registerMenuCommand('📄 Пройти от и до / собрать в Word', function () {
+      ensurePanel();
+      document.getElementById('sgx-panel').classList.add('on');
+      renderPanel();
+    });
+
     GM_registerMenuCommand('🔄 Обновить список ответов', function () {
       storeIndex(true)
         .then(function (items) { toast('✓ В хранилище ' + Object.keys(items).length + ' ответов'); })
@@ -1116,6 +1561,8 @@
 
   function init() {
     injectBridge();
+    ensurePanel();
+    if (job) setStatus('продолжаю: шаг ' + job.at + ' из ' + job.to);
 
     if (!cfg.token) {
       toast('⚠ Укажите токен записи: меню Tampermonkey → ⚙ Токен записи', true);
