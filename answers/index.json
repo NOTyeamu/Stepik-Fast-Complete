@@ -164,6 +164,11 @@
   "ext": "cs",
   "kind": "code"
  },
+ "l1755862_s4": {
+  "file": "l1755862_s4.json",
+  "ext": "json",
+  "kind": "choice"
+ },
  "l1755862_s5": {
   "file": "l1755862_s5.cs",
   "ext": "cs",
