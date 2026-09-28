@@ -82,6 +82,7 @@ function makeFetch(state) {
       const step = Number(/step=(\d+)/.exec(u)[1]);
       return ok({ submissions: state.submissions.filter((s) => s.step === step) }, 'json');
     }
+    if (u.includes('/api/steps?lesson')) return ok({ steps: state.lessonSteps || [] }, 'json');
     if (u.includes('/api/steps/')) return ok({ steps: [{ id: 108, lesson: LESSON, position: 8 }] }, 'json');
 
     throw new Error('unexpected fetch: ' + method + ' ' + u);
@@ -93,7 +94,8 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
     const dom = new JSDOM(html, { url, runScripts: 'dangerously', pretendToBeVisual: true });
     const { window } = dom;
     const state = {
-      calls: [], inbox: {}, inboxMessages: [], store: Object.assign({}, store || {}), submissions: submissions || [],
+      calls: [], inbox: {}, inboxMessages: [], menu: {},
+      store: Object.assign({}, store || {}), submissions: submissions || [],
       storeDown: !!storeDown, emptyLessonSteps: !!emptyLessonSteps,
       setValue: null, storage: { writeToken: token === undefined ? 'github_pat_11TEST' : token }
     };
@@ -127,7 +129,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       window, window.document, window.location, makeFetch(state), console, window.navigator,
       (k, d) => (k in state.storage ? state.storage[k] : d),
       (k, v) => { state.storage[k] = v; },
-      () => {}, () => {},
+      () => {}, (name, fn) => { state.menu[name] = fn; },
       window.CustomEvent, window.Event, window.KeyboardEvent, window.MouseEvent,
       window.HTMLTextAreaElement, window.HTMLInputElement, TextEncoder, btoa,
       (f, ms) => { const t = setTimeout(f, ms); timers.push(t); return t; },
@@ -292,6 +294,27 @@ const CHOICE_HTML = `<!doctype html><html><body>
       check('в очередь ничего не попало', Object.keys(st.inbox).length === 0);
       const t = win.document.querySelector('#sgx-toast');
       check('сказано про токен', t && /токен записи/.test(t.textContent), t && t.textContent);
+    }
+  });
+
+  console.log('\n=== 9. после сохранения скоба не пропадает (индекс отстаёт) ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [CODE_ANSWER], html: HTML, waitMs: 3200,
+    afterRun: async (win, st) => {
+      check('ответ ушёл в очередь', !!st.inbox['l1793281_s8.cs']);
+      const chip = win.document.querySelector('#sgx-chip');
+      check('скоба «есть решение» показана', chip && chip.classList.contains('on'),
+        chip && chip.className);
+
+      /* робот файл перенёс, но CDN ещё отдаёт старый index.json — обновляем список */
+      st.menu['🔄 Обновить список ответов']();
+      /* ждём два цикла скрипта: только тогда видно, потерял ли он свой ответ */
+      await new Promise((r) => setTimeout(r, 5200));
+      check('после обновления списка скоба на месте', chip.classList.contains('on'),
+        chip.className);
+      check('повторно ответ не отправлен', Object.keys(st.inbox).length === 1,
+        Object.keys(st.inbox).join(','));
     }
   });
 

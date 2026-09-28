@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      5.0.0
+// @version      5.0.1
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет».
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -49,7 +49,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '5.0.0';
+  var VERSION = '5.0.1';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -131,15 +131,26 @@
      Обновляем при переходе между шагами; ?t= снимает кэш CDN (он держит файл
      до пяти минут), поэтому чужие ответы видны максимум через минуту. */
   var cache = { at: 0, items: {} };
+
+  /* Ключи, которые мы уже положили в очередь, но которых ещё нет в индексе:
+     raw.githubusercontent.com отдаёт index.json до пяти минут старым, и без этого
+     списка скоба пропадала бы сразу после сохранения, а ответ уходил бы повторно. */
+  var pending = {};
+
   try {
     var cached = JSON.parse(GM_getValue('index', '{}'));
     if (cached && cached.items) cache = cached;
+    pending = JSON.parse(GM_getValue('pending', '{}')) || {};
   } catch (e) { /* ignore */ }
 
   function cacheIndex() { return cache.items; }
 
   function saveCache() {
     try { GM_setValue('index', JSON.stringify(cache)); } catch (e) { /* ignore */ }
+  }
+
+  function savePending() {
+    try { GM_setValue('pending', JSON.stringify(pending)); } catch (e) { /* ignore */ }
   }
 
   async function storeIndex(force) {
@@ -161,6 +172,14 @@
         ext: it.ext || 'txt'
       };
     });
+    /* своё, но ещё не перенесённое роботом (или не отданное CDN) не теряем */
+    Object.keys(pending).forEach(function (key) {
+      if (items[key]) { delete pending[key]; return; }
+      if (Date.now() - (pending[key].at || 0) > 30 * 60 * 1000) { delete pending[key]; return; }
+      items[key] = pending[key].item;
+    });
+    savePending();
+
     cache = { at: Date.now(), items: items };
     saveCache();
     storeDown = 0;
@@ -207,9 +226,12 @@
       throw new Error(await ghError(res));
     }
 
-    /* робот перенесёт файл в answers/ за секунды; чтобы скоба появилась сразу,
-       добавляем шаг в свой список сами */
-    cache.items[ctx.key] = { key: ctx.key, file: name, kind: item.kind, ext: item.ext };
+    /* робот перенесёт файл за секунды, но CDN ещё до пяти минут отдаёт старый
+       индекс — поэтому держим шаг в своём списке, пока он там не появится */
+    var entry = { key: ctx.key, file: name, kind: item.kind, ext: item.ext };
+    pending[ctx.key] = { at: Date.now(), item: entry };
+    savePending();
+    cache.items[ctx.key] = entry;
     cache.at = Date.now();
     saveCache();
     return { key: ctx.key };
@@ -227,23 +249,44 @@
   var netStep = null;   /* id шага, подсмотренный в запросах самой Stepik */
   var netAnswer = null; /* ответ, подсмотренный в запросе отправки */
 
-  async function stepIdFor(ctx) {
+  var stepIdCache = {};   /* ключ шага → id */
+  var apiNote = '';       /* чем закончилась последняя попытка прочитать ответ */
+
+  /* подсмотренный id обязательно проверяем по самому шагу: /api/steps отдаёт lesson и position */
+  async function stepMatches(id, ctx) {
+    try {
+      var st = (await sk('/api/steps/' + id)).steps[0];
+      return !!(st && String(st.lesson) === String(ctx.lesson) && st.position === ctx.step);
+    } catch (e) { return false; }
+  }
+
+  async function findStepId(ctx) {
+    if (stepIdCache[ctx.key]) return stepIdCache[ctx.key];
+
     if (stepIds[ctx.lesson] === undefined) {
       var list = [];
       try {
         var d = await sk('/api/lessons?ids[]=' + ctx.lesson);
         list = (d.lessons && d.lessons[0] && d.lessons[0].steps) || [];
       } catch (e) { /* приватный урок */ }
+      if (!list.length) {
+        /* тот же список другим эндпоинтом: иногда отвечает, когда первый пуст */
+        try {
+          var d2 = await sk('/api/steps?lesson=' + ctx.lesson);
+          var arr = d2.steps || [];
+          arr.sort(function (a, b) { return (a.position || 0) - (b.position || 0); });
+          list = arr.map(function (s) { return s.id; });
+        } catch (e2) { /* ignore */ }
+      }
       stepIds[ctx.lesson] = list.length ? list : null;
     }
-    if (stepIds[ctx.lesson]) return stepIds[ctx.lesson][ctx.step - 1] || null;
 
-    /* списка шагов нет — проверяем подсмотренный id: /api/steps отдаёт lesson и position */
-    if (netStep) {
-      try {
-        var st = (await sk('/api/steps/' + netStep)).steps[0];
-        if (st && String(st.lesson) === String(ctx.lesson) && st.position === ctx.step) return netStep;
-      } catch (e) { /* ignore */ }
+    var guess = stepIds[ctx.lesson] && stepIds[ctx.lesson][ctx.step - 1];
+    if (guess) { stepIdCache[ctx.key] = guess; return guess; }
+
+    if (netStep && await stepMatches(netStep, ctx)) {
+      stepIdCache[ctx.key] = netStep;
+      return netStep;
     }
     return null;
   }
@@ -267,17 +310,25 @@
   }
 
   async function apiAnswer(ctx) {
-    var stepId = await stepIdFor(ctx);
-    if (!stepId) return null;
+    var stepId = await findStepId(ctx);
+    if (!stepId) { apiNote = 'не определил id шага'; return null; }
+
     await myUserId();
     var d = await sk('/api/submissions?step=' + stepId + '&limit=20');
-    var good = (d.submissions || []).filter(function (s) {
-      /* только свои отправки: чужое решение сохранять нельзя */
-      return s && s.status === 'correct' && s.reply && (!myId || s.user === myId);
-    });
-    if (!good.length) return null;
+    /* только свои отправки: чужое решение сохранять нельзя */
+    var mine = (d.submissions || []).filter(function (s) { return s && (!myId || s.user === myId); });
+    var good = mine.filter(function (s) { return s.status === 'correct' && s.reply; });
+    if (!good.length) {
+      apiNote = 'шаг ' + stepId + ', ваших отправок ' + mine.length +
+        (mine.length ? ' (' + mine.map(function (s) { return s.status; }).join(', ') + ')' : '') +
+        ' — зачтённых нет';
+      return null;
+    }
     good.sort(function (a, b) { return (b.id || 0) - (a.id || 0); });
-    return fromReply(good[0].reply, 'Stepik API');
+    var ans = fromReply(good[0].reply, 'Stepik API');
+    apiNote = 'шаг ' + stepId + ', зачтённых отправок ' + good.length +
+      ', тип ответа: ' + (ans ? ans.kind : 'неизвестный');
+    return ans;
   }
 
   var EXT = {
@@ -364,16 +415,19 @@
   }
 
   async function currentAnswer(ctx) {
+    apiNote = '';
     try {
       var viaApi = await apiAnswer(ctx);
       if (viaApi) return viaApi;
-    } catch (e) { log('API Stepik недоступен:', e.message); }
+    } catch (e) { apiNote = 'API Stepik: ' + e.message; log('API Stepik недоступен:', e.message); }
 
     var code = domCode();
     if (!code || looksLikeTemplate(code.code)) return null;
+    var passed = domPassed();
+    apiNote += ' | в редакторе ' + code.code.length + ' символов, шаг зачтён: ' + (passed ? 'да' : 'нет');
     return {
       kind: 'code', content: code.code, ext: extOf(code.lang), lang: code.lang,
-      correct: domPassed(), via: 'DOM'
+      correct: passed, via: 'DOM'
     };
   }
 
@@ -804,7 +858,7 @@
   /* ------------------------------------------------------------ главный цикл */
 
   var busy = false, tried = {}, dismissed = {}, currentKey = null;
-  var lastOk = null, lastErr = null;
+  var lastOk = null, lastErr = null, lastReason = '';
 
   /* Опрос Stepik API — только страховка: основной путь это перехват отправки.
      Поэтому интервал растёт: 3с, 5с, 8с, 13с … до минуты. */
@@ -820,11 +874,20 @@
     var ans = null;
     if (netAnswer && netAnswer.key === ctx.key) ans = netAnswer.ans;
     if (!ans) ans = await currentAnswer(ctx);
-    if (!ans || !ans.correct) return null;
+    if (!ans || !ans.correct) {
+      lastReason = ans
+        ? 'ответ прочитан, но шаг не выглядит зачтённым — ' + (apiNote || 'причина неизвестна')
+        : 'ответ прочитать не удалось — ' + (apiNote || 'причина неизвестна');
+      return null;
+    }
 
     try {
       var res = await saveAnswer(ctx, ans, false);
-      if (res && res.skipped) return null;
+      if (res && res.skipped) {
+        lastReason = 'ответ для этого шага уже есть в хранилище';
+        return null;
+      }
+      lastReason = 'сохранено (' + (ans.via || '—') + ')';
       lastOk = { when: nowIso(), key: res.key, via: ans.via || '—' };
       toast('💾 Сохранено: шаг ' + ctx.step + ' · источник: ' + (ans.via || '—'));
       return res;
@@ -977,8 +1040,11 @@
         ? 'в хранилище уже есть ответ — появится скоба «вставить»'
         : 'ответа в хранилище нет');
       var sid = null;
-      try { sid = await stepIdFor(ctx); } catch (e) { /* ignore */ }
-      L.push('id шага в API Stepik: ' + (sid || 'не определён (сработает перехват отправки)'));
+      try { sid = await findStepId(ctx); } catch (e) { /* ignore */ }
+      var list = stepIds[ctx.lesson];
+      L.push('список шагов урока: ' + (list ? list.length + ' шт.' : 'НЕ ПОЛУЧЕН (ни /api/lessons, ни /api/steps)'));
+      L.push('подсмотренный id шага: ' + (netStep || 'нет'));
+      L.push('id шага в API Stepik: ' + (sid || 'НЕ ОПРЕДЕЛЁН — ответ прочитать не получится'));
       if (sid) {
         try {
           var d = await sk('/api/submissions?step=' + sid + '&limit=20');
@@ -989,6 +1055,10 @@
           L.push(good.length ? 'есть зачтённый ответ — сохранится сам' : 'зачтённых отправок нет');
         } catch (e) { L.push('API Stepik не ответил: ' + e.message); }
       }
+      var dom = domCode();
+      L.push('в редакторе на странице: ' + (dom ? dom.code.length + ' символов' : 'пусто'));
+      L.push('последняя попытка сохранить: ' + (lastReason || 'попыток не было'));
+      if (apiNote) L.push('подробности: ' + apiNote);
     }
 
     L.push('');
