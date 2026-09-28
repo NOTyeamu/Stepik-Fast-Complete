@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      5.2.2
+// @version      5.2.3
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет».
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -51,7 +51,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '5.2.2';
+  var VERSION = '5.2.3';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -982,17 +982,24 @@
     stopJob('готово: прошёл ' + jobTotal() + ' заданий');
   }
 
-  var SUBMIT_RE = /^(отправить|решить|проверить|submit|send)$/i;
+  /* Текст кнопки на Stepik — «Отправить на проверку», поэтому сверяем НАЧАЛО строки,
+     а не всю строку целиком. «Решить снова» отсекаем: это перезапуск задания, а не отправка. */
+  var SUBMIT_RE = /^(отправить|отправка|проверить|решить|submit|send|check|run)/i;
+  var NOT_SUBMIT_RE = /снова|заново|ещё раз|еще раз|again|отмена|cancel|удалить|delete/i;
 
-  function submitButton() {
+  function submitButton(includeDisabled) {
     var nodes = $$('button, [role="button"]');
+    var disabled = null;
     for (var i = 0; i < nodes.length; i++) {
-      if (nodes[i].disabled) continue;
-      if (!SUBMIT_RE.test(norm(nodes[i].textContent))) continue;
-      var r = nodes[i].getBoundingClientRect();
-      if (r.width && r.height) return nodes[i];
+      var el = nodes[i];
+      var text = norm(el.textContent);
+      if (!text || NOT_SUBMIT_RE.test(text) || !SUBMIT_RE.test(text)) continue;
+      var r = el.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      if (el.disabled) { disabled = disabled || el; continue; }
+      return el;
     }
-    return null;
+    return includeDisabled ? disabled : null;
   }
 
   async function jobSolve(ctx, target) {
@@ -1006,9 +1013,18 @@
       return nextJobStep();
     }
     await sleep(500);
+    /* если Stepik считает редактор пустым, кнопка остаётся серой — толкаем её событиями */
+    var ed = $('.CodeMirror, .cm-content, .attempt-wrapper__plugin textarea');
+    if (ed) {
+      try { ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) { /* ignore */ }
+      try { ed.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) { /* ignore */ }
+    }
     var btn = await waitFor(submitButton, 8000, 300);
     if (!btn) {
-      setStatus(target.label + ': ответ вставил, но кнопки «Отправить» нет — пропускаю');
+      var stuck = submitButton(true);
+      setStatus(target.label + (stuck
+        ? ': кнопка «' + norm(stuck.textContent) + '» неактивна — ответ вставил, но не отправил'
+        : ': кнопки «Отправить» нет — пропускаю'));
       await sleep(1500);
       return nextJobStep();
     }

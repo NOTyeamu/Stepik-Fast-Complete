@@ -106,7 +106,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       calls: [], inbox: {}, inboxMessages: [], menu: {},
       store: Object.assign({}, store || {}), submissions: submissions || [],
       storeDown: !!storeDown, emptyLessonSteps: !!emptyLessonSteps,
-      setValue: null, submitted: 0, docBlob: null, shots: 0,
+      setValue: null, submitted: 0, retried: 0, docBlob: null, shots: 0,
       storage: { writeToken: token === undefined ? 'github_pat_11TEST' : token }
     };
     if (job) state.storage.job = JSON.stringify(job);
@@ -139,6 +139,8 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
     };
     const submitBtn = window.document.querySelector('button.submit');
     if (submitBtn) submitBtn.addEventListener('click', () => { state.submitted++; });
+    const retryBtn = window.document.querySelector('button.retry');
+    if (retryBtn) retryBtn.addEventListener('click', () => { state.retried++; });
 
     const cmNode = window.document.querySelector('.CodeMirror');
     if (cmNode) mkCm(cmNode);
@@ -200,7 +202,8 @@ const JOB_HTML = `<!doctype html><html><body>
   <div class="attempt-wrapper"><div class="attempt-wrapper__content">
     <div class="step-text">Напишите программу, которая выводит число</div>
     <div class="CodeMirror"><textarea></textarea></div>
-    <button class="submit">Отправить</button>
+    <button class="attempt-wrapper-button submit" type="button">Отправить на проверку</button>
+    <button class="retry" type="button">Решить снова</button>
   </div></div>
 </body></html>`;
 
@@ -208,7 +211,7 @@ const LATE_HTML = `<!doctype html><html><body>
   <div class="attempt-wrapper"><div class="attempt-wrapper__content">
     <div class="step-text">Задание</div>
     <div class="attempt-wrapper__plugin"></div>
-    <button class="submit">Отправить</button>
+    <button class="attempt-wrapper-button submit" type="button">Отправить на проверку</button>
   </div></div>
 </body></html>`;
 
@@ -228,7 +231,8 @@ const SIDEBAR_HTML = `<!doctype html><html><body>
   <div class="attempt-wrapper"><div class="attempt-wrapper__content">
     <div class="step-text">Задание</div>
     <div class="CodeMirror"><textarea></textarea></div>
-    <button class="submit">Отправить</button>
+    <button class="attempt-wrapper-button submit" type="button">Отправить на проверку</button>
+    <button class="retry" type="button">Решить снова</button>
   </div></div>
 </body></html>`;
 
@@ -444,8 +448,8 @@ const CHOICE_HTML = `<!doctype html><html><body>
     job: { kind: 'solve', plan: [{ lesson: String(LESSON), step: 8, label: 'шаг 8' }], at: 0, shots: [], title: 'тест' },
     afterRun: async (win, st) => {
       check('ответ вставлен в редактор', st.setValue === 'int x = 42;', JSON.stringify(st.setValue));
-      const btn = win.document.querySelector('button.submit');
-      check('задание отправлено', st.submitted === 1, 'кликов: ' + st.submitted);
+      check('нажата именно «Отправить на проверку»', st.submitted === 1, 'кликов: ' + st.submitted);
+      check('«Решить снова» не нажата', st.retried === 0, 'кликов: ' + st.retried);
       check('обход завершён', JSON.parse(st.storage.job || 'null') === null, st.storage.job);
       check('статус говорит «готово»', /готово/.test(win.document.querySelector('#sgx-status').textContent),
         win.document.querySelector('#sgx-status').textContent);
