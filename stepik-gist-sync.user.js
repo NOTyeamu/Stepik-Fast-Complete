@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      5.2.1
+// @version      5.2.2
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет».
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -51,7 +51,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '5.2.1';
+  var VERSION = '5.2.2';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -614,8 +614,16 @@
   }
 
   async function insertSaved(ctx) {
-    /* редактор мог ещё не появиться — ждём его, а не сдаёмся сразу */
-    if (!insertTarget()) await waitFor(insertTarget, 8000, 250);
+    if (!insertTarget()) {
+      /* карточка нарисована, а ни поля, ни контейнера редактора нет — ждать бессмысленно */
+      if (cardDrawn() && !editorComing() && !stepHasInput()) {
+        throw new Error('на шаге нет ни кода, ни вариантов — вставлять нечего');
+      }
+      await waitFor(insertTarget, 4000, 250);
+      if (!insertTarget() && !stepHasInput()) {
+        throw new Error('на шаге нет ни кода, ни вариантов — вставлять нечего');
+      }
+    }
     var saved = await storeItem(ctx.key);
     if (!insertTarget()) {
       var again = retryButton();
@@ -892,6 +900,7 @@
   try { job = JSON.parse(GM_getValue(JOB_KEY, 'null')); } catch (e) { job = null; }
   var jobBusy = false;
   var lastDocUrl = '';
+  var lastNav = '';
 
   function saveJob() {
     try { GM_setValue(JOB_KEY, JSON.stringify(job)); } catch (e) { log('не сохранил задание:', e.message); }
@@ -924,9 +933,14 @@
     setStatus(message || 'остановлено');
   }
 
+  /* ?unit= из адреса относится к ТЕКУЩЕМУ уроку: с чужим unit Stepik отдаёт
+     «страница не найдена». Поэтому переносим его только внутри того же урока. */
   function goToStep(lesson, step) {
-    var url = '/lesson/' + lesson + '/step/' + step + (location.search || '');
-    if (new RegExp('/step/' + step + '(\\?|$)').test(location.pathname + location.search)) return;
+    var ctx = stepContext();
+    var same = !!(ctx && String(ctx.lesson) === String(lesson));
+    var url = '/lesson/' + lesson + '/step/' + step + (same ? (location.search || '') : '');
+    lastNav = url;
+    if (same && ctx.step === step) return;
     try { location.href = url; } catch (e) { log('перейти не удалось:', e.message); }
   }
 
@@ -1452,15 +1466,37 @@
 
   /* Stepik рисует редактор не мгновенно. Пока его нет, ничего не решаем: иначе
      скрипт «не находит» вставку и пропускает шаг, хотя тот просто не прогрузился. */
-  var readyKey = null, readySince = 0;
-  function stepReady(ctx) {
-    if (ctx.key !== readyKey) { readyKey = ctx.key; readySince = Date.now(); }
-    if (insertTarget()) return true;
-    /* карточка уже отрисована, а редактора на шаге просто нет (теория) */
+  var readyKey = null, readySince = 0, cardSince = 0;
+
+  /* есть ли на шаге куда вставлять вообще */
+  function stepHasInput() {
+    return !!($('.CodeMirror') || $('.cm-content') || $('.quiz-component input') ||
+      $('.attempt-wrapper__plugin textarea') || $('.attempt-wrapper__plugin input[type="text"]'));
+  }
+
+  /* карточка задания уже отрисована */
+  function cardDrawn() {
     var card = $('.attempt-wrapper__content, .quiz-component, .step-text');
-    if (card && card.getBoundingClientRect().height > 60) return true;
-    if (Date.now() - readySince > 12000) return true;
-    return false;
+    return !!(card && card.getBoundingClientRect().height > 60);
+  }
+
+  /* контейнер задания на месте, а поле ещё монтируется — вот-вот появится */
+  function editorComing() {
+    return !!$('.attempt-wrapper__plugin, .quiz-component');
+  }
+
+  function stepReady(ctx) {
+    if (ctx.key !== readyKey) { readyKey = ctx.key; readySince = Date.now(); cardSince = 0; }
+    if (insertTarget()) return true;
+
+    if (cardDrawn()) {
+      if (!cardSince) cardSince = Date.now();
+      /* контейнер задания есть — ждём редактор, он появляется не сразу */
+      if (editorComing()) return Date.now() - readySince > 6000;
+      /* ни поля, ни контейнера — вставлять нечего, не тянем время */
+      return Date.now() - cardSince > 1500;
+    }
+    return Date.now() - readySince > 8000;             /* страницы нет вовсе */
   }
 
   /* Опрос Stepik API — только страховка: основной путь это перехват отправки.
@@ -1667,6 +1703,8 @@
       var dom = domCode();
       L.push('в редакторе на странице: ' + (dom ? dom.code.length + ' символов' : 'пусто'));
       L.push('последняя попытка сохранить: ' + (lastReason || 'попыток не было'));
+      if (lastNav) L.push('последний переход: ' + lastNav);
+      L.push('на шаге есть поле ввода: ' + (stepHasInput() ? 'да' : 'нет'));
       if (apiNote) L.push('подробности: ' + apiNote);
     }
 

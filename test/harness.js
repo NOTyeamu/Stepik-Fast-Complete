@@ -207,7 +207,15 @@ const JOB_HTML = `<!doctype html><html><body>
 const LATE_HTML = `<!doctype html><html><body>
   <div class="attempt-wrapper"><div class="attempt-wrapper__content">
     <div class="step-text">Задание</div>
+    <div class="attempt-wrapper__plugin"></div>
     <button class="submit">Отправить</button>
+  </div></div>
+</body></html>`;
+
+/* шаг, где вставлять нечего: теория без единого поля */
+const THEORY_HTML = `<!doctype html><html><body>
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="step-text">Прочитайте теорию и переходите дальше</div>
   </div></div>
 </body></html>`;
 
@@ -537,6 +545,36 @@ const CHOICE_HTML = `<!doctype html><html><body>
       check('обход дошёл до конца', JSON.parse(st.storage.job || 'null') === null);
       check('в статусе нет ошибок',
         !/не смог|пропускаю/.test(win.document.querySelector('#sgx-status').textContent),
+        win.document.querySelector('#sgx-status').textContent);
+    }
+  });
+
+  console.log('\n=== 17. переход на другой урок — без чужого ?unit= ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: SIDEBAR_HTML, waitMs: 3000,
+    job: { kind: 'solve', plan: [{ lesson: '1755852', step: 1, label: '4.1.1' }], at: 0, shots: [], title: 'тест' },
+    afterRun: async (win, st) => {
+      st.menu['🧪 Проверка хранилища (отчёт)']();
+      await new Promise((r) => setTimeout(r, 1500));
+      const ta = win.document.querySelector('#sgx-report textarea');
+      const report = ta ? ta.value : '';
+      const nav = (report.match(/последний переход: .*/) || [''])[0];
+      check('отчёт открылся', !!ta);
+      check('переход на другой урок в отчёте есть', /\/lesson\/1755852\/step\/1/.test(report), nav);
+      check('чужой unit не перенесён', !/unit=1818966/.test(report), nav);
+    }
+  });
+
+  console.log('\n=== 18. шаг без полей — пропускается сразу ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: THEORY_HTML, waitMs: 6000,
+    job: { kind: 'solve', plan: [{ lesson: String(LESSON), step: 8, label: 'шаг 8' }], at: 0, shots: [], title: 'тест' },
+    afterRun: async (win, st) => {
+      check('шаг пропущен, обход закончен', JSON.parse(st.storage.job || 'null') === null,
+        st.storage.job);
+      check('в статусе «готово»', /готово/.test(win.document.querySelector('#sgx-status').textContent),
         win.document.querySelector('#sgx-status').textContent);
     }
   });
