@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      5.2.0
+// @version      5.2.1
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет».
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -51,7 +51,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '5.2.0';
+  var VERSION = '5.2.1';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -614,6 +614,8 @@
   }
 
   async function insertSaved(ctx) {
+    /* редактор мог ещё не появиться — ждём его, а не сдаёмся сразу */
+    if (!insertTarget()) await waitFor(insertTarget, 8000, 250);
     var saved = await storeItem(ctx.key);
     if (!insertTarget()) {
       var again = retryButton();
@@ -683,23 +685,23 @@
     'box-shadow:0 4px 12px rgba(0,0,0,.28)}',
     '#sgx-fab:hover{background:#2769C4}',
     '#sgx-fab.busy{background:#E07B2F}',
-    '#sgx-panel{position:fixed;left:16px;bottom:66px;z-index:2147482000;display:none;width:344px;padding:14px;',
-    'border-radius:12px;background:#fff;border:1px solid #DCDAD7;box-shadow:0 12px 32px rgba(0,0,0,.22);',
-    'font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1F1D1B}',
+    '#sgx-panel{position:fixed;left:16px;bottom:66px;z-index:2147482000;display:none;width:340px;max-width:calc(100vw - 32px);',
+    'padding:14px;box-sizing:border-box;border-radius:12px;background:#fff;border:1px solid #DCDAD7;',
+    'box-shadow:0 12px 32px rgba(0,0,0,.22);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1F1D1B}',
+    '#sgx-panel *{box-sizing:border-box}',
     '#sgx-panel.on{display:block}',
     '#sgx-panel h4{margin:0 0 10px;font-size:14px;color:#1F1D1B}',
-    '#sgx-panel .row{display:flex;align-items:center;gap:8px;margin-bottom:8px}',
-    '#sgx-panel input[type=number]{width:66px;padding:6px 8px;border:1px solid #D5D3D0;border-radius:7px;',
-    'font:inherit;color:inherit;background:#fff}',
-    '#sgx-panel button{flex:1;padding:9px 10px;border:0;border-radius:8px;cursor:pointer;',
+    '#sgx-panel .row{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}',
+    '#sgx-panel .row>span{flex:0 0 auto;color:#5C5854}',
+    '#sgx-panel select,#sgx-panel input{flex:1 1 80px;min-width:0;padding:7px 9px;border:1px solid #D5D3D0;',
+    'border-radius:7px;font:inherit;background:#fff;color:inherit}',
+    '#sgx-panel button{flex:1 1 100%;padding:9px 10px;border:0;border-radius:8px;cursor:pointer;',
     'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px;font-weight:600;line-height:1.2;background:#2F7CE0;color:#fff}',
     '#sgx-panel button.sec{background:#EEF2F7;color:#1F1D1B}',
     '#sgx-panel button.danger{background:#E05A4A;color:#fff}',
     '#sgx-panel button:disabled{opacity:.45;cursor:default}',
     '#sgx-status{margin:2px 0 8px;color:#5C5854;min-height:18px}',
-    '#sgx-panel select{flex:1;padding:7px 9px;border:1px solid #D5D3D0;border-radius:7px;font:inherit;',
-    'background:#fff;color:inherit}',
-    '#sgx-panel #sgx-total{color:#8A8783;font-size:12px;margin-left:auto;white-space:nowrap}'
+    '#sgx-panel #sgx-total{color:#8A8783;font-size:12px}'
   ].join(''));
 
   var chip = null, chipAnchor = null, toastEl = null, toastTimer = null;
@@ -990,7 +992,7 @@
       return nextJobStep();
     }
     await sleep(500);
-    var btn = submitButton();
+    var btn = await waitFor(submitButton, 8000, 300);
     if (!btn) {
       setStatus(target.label + ': ответ вставил, но кнопки «Отправить» нет — пропускаю');
       await sleep(1500);
@@ -1304,38 +1306,43 @@
   function renderPanel(keepStatus) {
     var panel = document.getElementById('sgx-panel');
     if (!panel) return;
-    var from = document.getElementById('sgx-from');
-    var to = document.getElementById('sgx-to');
-    var list = document.getElementById('sgx-lessons');
     var ctx = stepContext();
     var lessons = lessonList();
     var bySteps = mode() === 'steps';
 
-    /* подсказки: в режиме уроков — номера из меню курса, в режиме шагов — числа */
-    if (list) {
-      list.innerHTML = '';
-      lessons.forEach(function (l) {
-        var o = document.createElement('option');
-        o.value = l.label;
-        o.label = l.label + ' ' + l.title;
-        list.appendChild(o);
-      });
-    }
-    from.type = bySteps ? 'number' : 'text';
-    to.type = bySteps ? 'number' : 'text';
-    from.min = to.min = bySteps ? '1' : '';
-    from.placeholder = to.placeholder = bySteps ? '1' : '4.1';
+    document.getElementById('sgx-row-lessons').style.display = bySteps ? 'none' : 'flex';
+    document.getElementById('sgx-row-steps').style.display = bySteps ? 'flex' : 'none';
 
-    if (ctx && document.activeElement !== from && document.activeElement !== to) {
-      if (bySteps) {
-        if (!from.value || isNaN(parseInt(from.value, 10))) from.value = ctx.step;
-        if (!to.value || isNaN(parseInt(to.value, 10))) to.value = ctx.step;
-      } else {
-        var cur = lessons.filter(function (l) { return l.id === ctx.lesson; })[0];
-        var label = cur ? cur.label : (lessons[0] && lessons[0].label) || '';
-        if (!from.value || from.value.indexOf('.') < 0) from.value = label;
-        if (!to.value || to.value.indexOf('.') < 0) to.value = label;
+    /* список уроков — обычным выпадающим списком: видно все, а не только текущий */
+    var fromSel = document.getElementById('sgx-from-l');
+    var toSel = document.getElementById('sgx-to-l');
+    if (fromSel.options.length !== lessons.length) {
+      var keepFrom = fromSel.value, keepTo = toSel.value;
+      [fromSel, toSel].forEach(function (sel) {
+        sel.innerHTML = '';
+        lessons.forEach(function (l) {
+          var o = document.createElement('option');
+          o.value = l.label;
+          o.textContent = l.label + ' — ' + (l.title || '').slice(0, 34);
+          sel.appendChild(o);
+        });
+      });
+      if (keepFrom) fromSel.value = keepFrom;
+      if (keepTo) toSel.value = keepTo;
+    }
+    if (lessons.length) {
+      if (!fromSel.value) {
+        var cur = lessons.filter(function (l) { return l.id === (ctx && ctx.lesson); })[0];
+        fromSel.value = (cur || lessons[0]).label;
       }
+      if (!toSel.value) toSel.value = fromSel.value;
+    }
+
+    var from = document.getElementById('sgx-from');
+    var to = document.getElementById('sgx-to');
+    if (ctx && bySteps && document.activeElement !== from && document.activeElement !== to) {
+      if (!from.value || isNaN(parseInt(from.value, 10))) from.value = ctx.step;
+      if (!to.value || isNaN(parseInt(to.value, 10))) to.value = ctx.step;
     }
 
     var total = document.getElementById('sgx-total');
@@ -1370,9 +1377,11 @@
       '<option value="lessons">уроки курса (4.1 … 4.3)</option>',
       '<option value="steps">шаги одного урока</option>',
       '</select></div>',
-      '<div class="row">с <input id="sgx-from" list="sgx-lessons">',
-      'по <input id="sgx-to" list="sgx-lessons"><span id="sgx-total"></span></div>',
-      '<datalist id="sgx-lessons"></datalist>',
+      '<div class="row" id="sgx-row-lessons">с <select id="sgx-from-l"></select>',
+      'по <select id="sgx-to-l"></select></div>',
+      '<div class="row" id="sgx-row-steps">с <input id="sgx-from" type="number" min="1">',
+      'по <input id="sgx-to" type="number" min="1"></div>',
+      '<div class="row"><span id="sgx-total"></span></div>',
       '<div class="row"><button id="sgx-solve">Пройти: вставить и отправить</button></div>',
       '<div class="row"><button id="sgx-collect" class="sec">Собрать в Word со скринами</button></div>',
       '<div id="sgx-status"></div>',
@@ -1398,12 +1407,12 @@
     if (!ctx) { setStatus('открой урок: stepik.org/lesson/<урок>/step/<номер>'); return; }
     if (kind === 'solve' && !cfg.token) { setStatus('нужен токен записи — меню → ⚙ Токен записи'); return; }
 
-    var from = document.getElementById('sgx-from').value;
-    var to = document.getElementById('sgx-to').value;
     var plan = [], title = '';
 
     try {
       if (mode() === 'steps') {
+        var from = document.getElementById('sgx-from').value;
+        var to = document.getElementById('sgx-to').value;
         var a = parseInt(from, 10), b = parseInt(to, 10);
         if (!a || a < 1) throw new Error('укажи номер первого шага');
         if (!b || b < a) throw new Error('последний шаг должен быть не меньше первого');
@@ -1411,7 +1420,10 @@
         plan = stepsPlan(ctx, a, b);
         title = 'урок ' + ctx.lesson + ', шаги ' + a + '–' + b;
       } else {
-        var lessons = lessonsInRange(from, to);
+        var lFrom = document.getElementById('sgx-from-l').value;
+        var lTo = document.getElementById('sgx-to-l').value;
+        if (!lFrom || !lTo) throw new Error('в меню курса не нашлись уроки — открой любой урок этого курса');
+        var lessons = lessonsInRange(lFrom, lTo);
         setStatus('собираю список заданий…');
         plan = await lessonPlan(lessons);
         title = 'уроки ' + lessons[0].label + '–' + lessons[lessons.length - 1].label;
@@ -1437,6 +1449,19 @@
 
   var busy = false, tried = {}, dismissed = {}, currentKey = null;
   var lastOk = null, lastErr = null, lastReason = '';
+
+  /* Stepik рисует редактор не мгновенно. Пока его нет, ничего не решаем: иначе
+     скрипт «не находит» вставку и пропускает шаг, хотя тот просто не прогрузился. */
+  var readyKey = null, readySince = 0;
+  function stepReady(ctx) {
+    if (ctx.key !== readyKey) { readyKey = ctx.key; readySince = Date.now(); }
+    if (insertTarget()) return true;
+    /* карточка уже отрисована, а редактора на шаге просто нет (теория) */
+    var card = $('.attempt-wrapper__content, .quiz-component, .step-text');
+    if (card && card.getBoundingClientRect().height > 60) return true;
+    if (Date.now() - readySince > 12000) return true;
+    return false;
+  }
 
   /* Опрос Stepik API — только страховка: основной путь это перехват отправки.
      Поэтому интервал растёт: 3с, 5с, 8с, 13с … до минуты. */
@@ -1487,6 +1512,9 @@
         storeIndex(true).catch(function (e) { log('список не обновился:', e.message); });
       }
     }
+
+    /* страница ещё не дорисована — не спешим с выводами */
+    if (!stepReady(ctx)) return;
 
     /* идёт обход заданий — скоба и автопостинг на это время не нужны */
     if (job) { hideChip(); runJob(ctx); return; }

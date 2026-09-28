@@ -98,7 +98,7 @@ function makeFetch(state) {
   };
 }
 
-function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, waitMs, afterRun }) {
+function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun }) {
   return new Promise((resolve, reject) => {
     const dom = new JSDOM(html, { url, runScripts: 'dangerously', pretendToBeVisual: true });
     const { window } = dom;
@@ -129,17 +129,29 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
     };
     Object.defineProperty(window.HTMLElement.prototype, 'offsetWidth', { get: () => 120, configurable: true });
 
-    const cmNode = window.document.querySelector('.CodeMirror');
-    if (cmNode) {
-      const submitBtn = window.document.querySelector('button.submit');
-      if (submitBtn) submitBtn.addEventListener('click', () => { state.submitted++; });
-
-      cmNode.CodeMirror = {
+    const mkCm = (node) => {
+      node.CodeMirror = {
         getValue: () => (state.setValue == null ? '' : state.setValue),
         setValue: (v) => { state.setValue = v; },
         getOption: () => 'text/x-csharp',
         refresh() {}, focus() {}
       };
+    };
+    const submitBtn = window.document.querySelector('button.submit');
+    if (submitBtn) submitBtn.addEventListener('click', () => { state.submitted++; });
+
+    const cmNode = window.document.querySelector('.CodeMirror');
+    if (cmNode) mkCm(cmNode);
+
+    /* редактор, который Stepik дорисовывает с задержкой */
+    if (lateEditor) {
+      setTimeout(() => {
+        const wrap = window.document.querySelector('.attempt-wrapper__content') || window.document.body;
+        const d = window.document.createElement('div');
+        d.className = 'CodeMirror';
+        wrap.insertBefore(d, wrap.firstChild);
+        mkCm(d);
+      }, lateEditor);
     }
 
     const fn = new Function(
@@ -188,6 +200,13 @@ const JOB_HTML = `<!doctype html><html><body>
   <div class="attempt-wrapper"><div class="attempt-wrapper__content">
     <div class="step-text">Напишите программу, которая выводит число</div>
     <div class="CodeMirror"><textarea></textarea></div>
+    <button class="submit">Отправить</button>
+  </div></div>
+</body></html>`;
+
+const LATE_HTML = `<!doctype html><html><body>
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="step-text">Задание</div>
     <button class="submit">Отправить</button>
   </div></div>
 </body></html>`;
@@ -377,9 +396,12 @@ const CHOICE_HTML = `<!doctype html><html><body>
       const panel = win.document.querySelector('#sgx-panel');
       check('кнопка «от и до» есть', !!fab, fab && fab.textContent);
       check('панель есть', !!panel);
-      check('есть поле «с шага»', !!win.document.querySelector('#sgx-from'));
       check('есть выбор «уроки / шаги»', !!win.document.querySelector('#sgx-mode'));
       check('режим по умолчанию — уроки', win.document.querySelector('#sgx-mode').value === 'lessons');
+      check('в режиме уроков видны списки уроков', !!win.document.querySelector('#sgx-from-l'));
+      check('в режиме уроков поля шагов скрыты',
+        win.document.querySelector('#sgx-row-steps').style.display === 'none',
+        win.document.querySelector('#sgx-row-steps').style.display);
       check('есть кнопка «Пройти»', /Пройти/.test(win.document.querySelector('#sgx-solve').textContent));
       check('есть кнопка «Собрать в Word»', /Word/.test(win.document.querySelector('#sgx-collect').textContent));
       fab.click();
@@ -457,14 +479,19 @@ const CHOICE_HTML = `<!doctype html><html><body>
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
     store: {}, submissions: [], html: SIDEBAR_HTML, waitMs: 3000,
     afterRun: async (win, st) => {
-      const opts = win.document.querySelectorAll('#sgx-lessons option');
+      const sel = win.document.querySelector('#sgx-from-l');
+      const opts = sel.querySelectorAll('option');
       check('уроки нашлись в меню курса', opts.length === 3, opts.length + ': ' +
         Array.from(opts).map((o) => o.value).join(', '));
-      check('подсказки с номерами уроков', Array.from(opts).map((o) => o.value).join(',') === '4.1,4.2,4.3',
+      check('в списке все номера уроков', Array.from(opts).map((o) => o.value).join(',') === '4.1,4.2,4.3',
         Array.from(opts).map((o) => o.value).join(','));
+      check('в списке видно название урока', /Знакомство с методами/.test(opts[0].textContent),
+        opts[0].textContent);
+      check('второй список тоже заполнен',
+        win.document.querySelector('#sgx-to-l').options.length === 3);
 
-      win.document.querySelector('#sgx-from').value = '4.1';
-      win.document.querySelector('#sgx-to').value = '4.3';
+      sel.value = '4.1';
+      win.document.querySelector('#sgx-to-l').value = '4.3';
       win.document.querySelector('#sgx-solve').click();
       await new Promise((r) => setTimeout(r, 1200));
 
@@ -495,6 +522,22 @@ const CHOICE_HTML = `<!doctype html><html><body>
       check('план из трёх шагов', job && job.plan.length === 3, job && job.plan.length);
       check('все шаги текущего урока', job && job.plan.every((p) => p.lesson === String(LESSON)));
       check('первый шаг — 2', job && job.plan[0].step === 2, job && job.plan[0].step);
+    }
+  });
+
+  console.log('\n=== 16. редактор появился с задержкой — скрипт дождался ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: { l1793281_s8: { file: 'l1793281_s8.cs', ext: 'cs', kind: 'code', content: 'int late = 1;' } },
+    submissions: [], html: LATE_HTML, lateEditor: 4000, waitMs: 12000,
+    job: { kind: 'solve', plan: [{ lesson: String(LESSON), step: 8, label: 'шаг 8' }], at: 0, shots: [], title: 'тест' },
+    afterRun: async (win, st) => {
+      check('ответ всё-таки вставлен', st.setValue === 'int late = 1;', JSON.stringify(st.setValue));
+      check('задание отправлено, а не пропущено', st.submitted === 1, 'кликов: ' + st.submitted);
+      check('обход дошёл до конца', JSON.parse(st.storage.job || 'null') === null);
+      check('в статусе нет ошибок',
+        !/не смог|пропускаю/.test(win.document.querySelector('#sgx-status').textContent),
+        win.document.querySelector('#sgx-status').textContent);
     }
   });
 
