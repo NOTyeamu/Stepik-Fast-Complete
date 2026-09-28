@@ -1,56 +1,69 @@
 name: answers
 
-# Единственный, кто пишет в папку answers/. Пользовательский скрипт только
-# запускает этот workflow с полезной нагрузкой и права на запись в репозиторий
-# при этом не получает: у токена в скрипте есть только «Actions: write».
+# Единственный, кто пишет в папку answers/.
 #
-# Запуск вручную: Actions → answers → Run workflow (payload можно любой).
+# Скрипт в браузере кладёт ответ в очередь inbox/ (для этого ему хватает права
+# Contents: write), а этот workflow переносит его в answers/ — и заодно откатывает
+# любые правки answers/, сделанные не роботом. Право на изменение workflow-файлов
+# у токена в скрипте отсутствует (нужно workflows=write), поэтому выключить или
+# подменить этого робота он не может.
+#
+# Запуск: автоматически на push в inbox/ или answers/, плюс раз в 20 минут
+# (страховка, если что-то застряло в очереди) и вручную из вкладки Actions.
 
 on:
+  push:
+    paths:
+      - 'inbox/**'
+      - 'answers/**'
   workflow_dispatch:
-    inputs:
-      payload:
-        description: 'base64(JSON {key, kind, ext, content, author})'
-        required: true
-        type: string
+  schedule:
+    - cron: '*/20 * * * *'
 
 permissions:
   contents: write
 
+concurrency:
+  group: answers
+
 jobs:
-  save:
+  sync:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Записать ответ
+      - name: Перенести очередь и проверить папку
         env:
-          PAYLOAD: ${{ inputs.payload }}
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          COMMITTER_EMAIL: ${{ github.event.head_commit.committer.email }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
           git config user.name "stepik-answers-bot"
           git config user.email "stepik-answers-bot@users.noreply.github.com"
 
-          # Попытки нужны, когда несколько человек сохраняют ответ одновременно:
-          # каждый раз начинаем с свежего main, поэтому конфликтов не бывает,
-          # а index.json пересобирается из фактического содержимого папки.
+          # Попытки нужны, когда ответы сохраняют одновременно: каждый раз начинаем
+          # со свежего main, поэтому конфликтов не бывает.
           for attempt in 1 2 3 4 5; do
             git fetch --depth 1 origin main
             git reset --hard origin/main
-            node .github/scripts/save-answer.mjs
-            git add answers
+            node .github/scripts/process.mjs
+            git add -A
             if git diff --cached --quiet; then
-              echo "такой ответ уже есть — ничего не меняем"
+              echo "изменений нет"
               exit 0
             fi
-            git commit -q -m "answers: обновление из Stepik"
+            git commit -q -m "answers: синхронизация"
             if git push origin HEAD:main; then
               echo "готово"
               exit 0
             fi
-            echo "не успели — кто-то записал раньше, попытка $attempt"
+            echo "не успели — попытка $attempt"
             sleep $((attempt * 3))
           done
-          echo "не удалось записать после 5 попыток" >&2
+          echo "не удалось за 5 попыток" >&2
           exit 1

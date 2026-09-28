@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      3.0.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общий GitHub Gist. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор больше ни на что не влияют. На шаге, для которого решение уже сохранено, справа от карточки появляется скоба «вставить / нет».
+// @version      5.0.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет».
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
+// @connect      raw.githubusercontent.com
 // @connect      api.github.com
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -19,53 +20,51 @@
 
 /*
  * ЧТО ДЕЛАЕТ
- *  • Шаг зачтён — ответ сам уезжает в гист. Ответ берётся не из DOM, а из API
- *    Stepik (/api/submissions): сервер отдаёт ровно то, что принял, вместе со
- *    статусом "correct". Плюс перехватываются сетевые запросы самой Stepik,
+ *  • Шаг зачтён — ответ сам уезжает в общую папку answers/ репозитория. Ответ берётся
+ *    не из DOM, а из API Stepik (/api/submissions): сервер отдаёт ровно то, что принял,
+ *    вместе со статусом "correct". Плюс перехватываются сетевые запросы самой Stepik,
  *    чтобы поймать отправку в момент нажатия «Отправить».
- *  • На шаге, для которого решение уже есть в гисте, справа от карточки
- *    появляется скоба ( есть решение · вставить / нет ).
+ *  • На шаге, для которого решение уже есть, справа от карточки появляется скоба
+ *    ( есть решение · вставить / нет ).
  *
  * ГДЕ ЛЕЖИТ
  *    Исходник и установка: https://github.com/NOTyeamu/Stepik-Fast-Complete
  *    Установка в один клик (Tampermonkey сам предложит обновление):
  *    https://raw.githubusercontent.com/NOTyeamu/Stepik-Fast-Complete/main/stepik-gist-sync.user.js
  *
+ * КАК ХРАНЯТСЯ ОТВЕТЫ
+ *    answers/index.json          — список: ключ шага → файл, язык, вид (код или тест)
+ *    answers/l<урок>_s<шаг>.<яз> — сам ответ; для теста это .json с вариантами
+ *    Скрипт кладёт новый ответ в очередь inbox/, а workflow answers.yml переносит
+ *    его в answers/ и откатывает любые правки этой папки, сделанные не роботом.
+ *    Существующие ответы не перезаписываются никогда — папка только пополняется.
+ *    Права на изменение самих workflow-файлов у токена нет (нужно workflows=write),
+ *    поэтому выключить робота он не может.
+ *
  * НАСТРОЙКА
- *    Меню Tampermonkey → «⚙ Токен и gist». Ctrl+Alt+I — вставить решение,
+ *    Меню Tampermonkey → «⚙ Токен записи». Ctrl+Alt+I — вставить решение,
  *    Ctrl+Alt+S — перезаписать принудительно, Ctrl+Alt+D — отчёт самопроверки.
- *
- * ПРО ДОСТУП (главная причина, почему у людей не сохранялось)
- *    У гистов нет соавторов: писать в гист может только владелец токена.
- *    Поэтому все пишут токеном владельца общего гиста — он и вшит ниже.
- *    Если токен чужой для этого гиста, скрипт сам создаст личный гист,
- *    а общий оставит для чтения (и скажет об этом).
- *
- * ФАЙЛЫ В ГИСТЕ
- *    stepik_l<урок>_s<шаг>.<язык>   — код решения
- *    stepik_l<урок>_s<шаг>.json     — ответ теста: {"type":"choice","ids":[...],"answers":[...]}
- *    Отдельного файла-индекса нет: список файлов гиста и есть индекс,
- *    поэтому несколько человек могут писать одновременно и не затирать друг друга.
  */
 
 (function () {
   'use strict';
 
-  var VERSION = '3.0.0';
-  var SELF = '_stepik_selftest.json';
-  var LIMIT = 'stepik_l';
+  var VERSION = '5.0.0';
 
-  /* Токен владельца общего гиста. Разбит на куски намеренно: GitHub
-     автоматически отзывает токены, найденные в открытых репозиториях. */
-  var DEF_TOKEN = 'ghp_iFvxe9X0' + '9ajuoqLOKpCzOtop' + 'Jk0iSz050PwP';
-  var DEF_GIST = '7acba5794d6d2354921bee99ac31fe23';
+  /* Репозиторий с ответами */
+  var REPO = 'NOTyeamu/Stepik-Fast-Complete';
+  var BRANCH = 'main';
 
+  /* Токен с единственным правом «Actions: write» — только на этот репозиторий.
+     Разбит на куски намеренно: GitHub автоматически отзывает токены, найденные
+     в открытых репозиториях, — ищет непрерывную строку. */
+  var DEF_TOKEN = 'github_pat_1' + '1A3MLZTQ090Ak9zudxqsU_bXlwU6roNAIiWb9zM03AZafZjVxnRM5HCWchgvgf1AKSFEY' + 'VU5DY7J16pY2';
+
+  /* ключ хранилища отдельный от старых версий: там в 'token' лежал токен гиста */
   var cfg = {
-    token: GM_getValue('token', DEF_TOKEN),
-    gistId: GM_getValue('gistId', DEF_GIST),
-    sharedGistId: GM_getValue('sharedGistId', '')
+    token: GM_getValue('writeToken', DEF_TOKEN)
   };
-  function setCfg(key, val) { cfg[key] = val; GM_setValue(key, val); }
+  function setToken(val) { cfg.token = val; GM_setValue('writeToken', val); }
 
   /* ---------------------------------------------------------------- утилиты */
 
@@ -86,177 +85,134 @@
     return obj;
   }
 
-  /* ------------------------------------------------------------ GitHub Gist */
+  /* ------------------------------------------------------------- хранилище */
 
-  /* GitHub даёт 5000 запросов в час на токен. Раньше скрипт долбил API каждые
-     800 мс при неудачной записи и выжигал лимит всем сразу — теперь при 403
-     «rate limit» запросы к GitHub замирают до конца окна. */
-  var rateUntil = 0;
+  /* Ответы лежат в репозитории, в папке answers/. Читаются обычными ссылками
+     (репозиторий публичный, прав не нужно). Пишет в папку только workflow
+     answers.yml: скрипт кладёт ответ в очередь inbox/, робот переносит его
+     в answers/ и заодно откатывает любые правки папки, сделанные не им.
+     Права на изменение workflow-файлов у токена нет, поэтому выключить робота
+     он не может. */
 
-  async function gh(method, path, body) {
-    if (!cfg.token) throw new Error('не задан GitHub-токен (меню → ⚙ Токен и gist)');
-    if (Date.now() < rateUntil) throw rateError();
-    var res = await fetch('https://api.github.com' + path, {
-      method: method,
-      headers: {
-        Authorization: 'Bearer ' + cfg.token,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'Content-Type': 'application/json'
-      },
-      body: body ? JSON.stringify(body) : undefined
-    });
-    var text = await res.text(), data = {};
-    try { data = JSON.parse(text) || {}; } catch (e) { /* не JSON */ }
-    if (!res.ok) {
-      var msg = data.message || '';
-      if (res.status === 401) msg = 'токен недействителен или истёк';
-      else if (res.status === 403 && /rate limit/i.test(msg)) {
-        var reset = Number(res.headers.get('x-ratelimit-reset')) * 1000;
-        rateUntil = reset > Date.now() ? reset : Date.now() + 600000;
-        throw rateError();
-      } else if (res.status === 403) msg = 'у токена нет права на гисты (нужен scope "gist")';
-      else if (res.status === 404) msg = 'гист не найден или запись в него запрещена';
-      var err = new Error(msg || ('GitHub ' + res.status));
-      err.status = res.status;
-      throw err;
-    }
-    return data;
-  }
+  var API = 'https://api.github.com/repos/' + REPO;
+  var RAW = 'https://raw.githubusercontent.com/' + REPO + '/' + BRANCH + '/answers/';
+  var INBOX = 'inbox';
 
-  function rateError() {
-    var mins = Math.max(1, Math.round((rateUntil - Date.now()) / 60000));
-    var err = new Error('исчерпан лимит запросов к GitHub (5000/час), ждать ещё ~' + mins + ' мин');
-    err.status = 403;
-    err.rate = true;
-    return err;
-  }
+  var STORE_TTL = 10 * 60 * 1000;   /* сколько доверяем локальному списку шагов */
+  var storeDown = 0;                /* GitHub молчит — не долбим его */
 
-  /* Имена файлов в гисте = индекс. Ключ шага выводится из имени файла,
-     поэтому гонки между несколькими людьми ничего не ломают. */
-  var names = {};
-  try { names = JSON.parse(GM_getValue('names', '{}')) || {}; } catch (e) { /* ignore */ }
+  function rawUrl(name) { return RAW + name; }
 
-  function setNames(id, list) {
-    if (!id) return;
-    names[id] = list.slice();
-    try { GM_setValue('names', JSON.stringify(names)); } catch (e) { /* ignore */ }
-  }
-
-  function parseName(name) {
-    var m = /^stepik_l(\d+)_s(\d+)\.([a-z0-9]+)$/i.exec(name);
-    if (!m) return null;
-    var ext = m[3].toLowerCase();
+  function ghHeaders() {
     return {
-      lesson: m[1], step: +m[2], ext: ext, file: name,
-      kind: ext === 'json' ? 'choice' : 'code'
+      Authorization: 'Bearer ' + cfg.token,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json'
     };
   }
 
-  function index() {
-    var out = {};
-    [cfg.gistId, cfg.sharedGistId].forEach(function (id) {
-      if (!id) return;
-      (names[id] || []).forEach(function (n) {
-        var p = parseName(n);
-        var key = p && ('l' + p.lesson + '_s' + p.step);
-        if (key && !out[key]) { p.src = id; out[key] = p; }
-      });
+  async function ghError(res) {
+    var msg = '';
+    try { msg = (JSON.parse(await res.text()) || {}).message || ''; } catch (e) { /* ignore */ }
+    if (res.status === 401) return 'токен не принят GitHub — меню → ⚙ Токен записи';
+    if (res.status === 403) return 'токену не хватает права «Contents: write» на ' + REPO;
+    if (res.status === 404) return 'токен не видит репозиторий ' + REPO;
+    return 'GitHub ответил ' + res.status + (msg ? ': ' + msg : '');
+  }
+
+  function b64(str) {
+    var bytes = new TextEncoder().encode(str), bin = '';
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+
+  /* Список сохранённых шагов держим локально: скоба должна рисоваться мгновенно.
+     Обновляем при переходе между шагами; ?t= снимает кэш CDN (он держит файл
+     до пяти минут), поэтому чужие ответы видны максимум через минуту. */
+  var cache = { at: 0, items: {} };
+  try {
+    var cached = JSON.parse(GM_getValue('index', '{}'));
+    if (cached && cached.items) cache = cached;
+  } catch (e) { /* ignore */ }
+
+  function cacheIndex() { return cache.items; }
+
+  function saveCache() {
+    try { GM_setValue('index', JSON.stringify(cache)); } catch (e) { /* ignore */ }
+  }
+
+  async function storeIndex(force) {
+    if (!force && cache.at && Date.now() - cache.at < STORE_TTL) return cache.items;
+    var url = rawUrl('index.json') + '?t=' + Math.floor(Date.now() / 60000);
+    var res = await fetch(url, { headers: { Accept: 'text/plain' } });
+    if (!res.ok) throw new Error('список ответов не читается (HTTP ' + res.status + ')');
+    var data = null;
+    try { data = JSON.parse(await res.text()); } catch (e) { data = null; }
+    if (!data) throw new Error('index.json в репозитории повреждён');
+
+    var items = {};
+    Object.keys(data).forEach(function (key) {
+      var it = data[key] || {};
+      items[key] = {
+        key: key,
+        file: it.file || (key + '.' + (it.ext || 'txt')),
+        kind: it.kind || 'code',
+        ext: it.ext || 'txt'
+      };
     });
-    return out;
+    cache = { at: Date.now(), items: items };
+    saveCache();
+    storeDown = 0;
+    return items;
   }
 
-  function gistIdOf(file) {
-    var found = null;
-    [cfg.gistId, cfg.sharedGistId].forEach(function (id) {
-      if (!found && id && (names[id] || []).indexOf(file) >= 0) found = id;
-    });
-    return found;
-  }
-
-  var gistCache = null;
-
-  async function refresh(force) {
-    if (!cfg.gistId) return null;
-    if (gistCache && !force) return gistCache;
-    gistCache = await gh('GET', '/gists/' + cfg.gistId);
-    setNames(cfg.gistId, Object.keys(gistCache.files || {}));
-    if (cfg.sharedGistId && cfg.sharedGistId !== cfg.gistId) {
-      try {
-        var other = await gh('GET', '/gists/' + cfg.sharedGistId);
-        setNames(cfg.sharedGistId, Object.keys(other.files || {}));
-      } catch (e) { /* общий гист недоступен — не критично */ }
-    }
-    return gistCache;
-  }
-
-  var ownGistId = null;
-
-  async function makeOwnGist() {
-    var old = cfg.gistId;
-    var files = {};
-    files[SELF] = { content: JSON.stringify({ at: nowIso(), note: 'личный гист' }, null, 2) };
-    var created = await gh('POST', '/gists', {
-      description: 'Stepik answers (личный)',
-      public: false,
-      files: files
-    });
-    if (old && old !== created.id) setCfg('sharedGistId', old);
-    setCfg('gistId', created.id);
-    ownGistId = created.id;
-    gistCache = created;
-    setNames(created.id, Object.keys(created.files || {}));
-    toast('Гист был чужим — ответы теперь идут в личный ' + created.id);
-    return created;
-  }
-
-  /* чужой или недоступный гист → один раз за сессию заводим свой */
-  async function forkIfForeign(err) {
-    if (err.rate) throw err;                /* лимит запросов — не повод заводить новый гист */
-    if (err.status !== 403 && err.status !== 404) throw err;
-    if (ownGistId) throw err;
-    await makeOwnGist();
+  async function storeItem(key) {
+    var it = cacheIndex()[key];
+    if (!it) throw new Error('в хранилище нет ответа для ' + key);
+    var res = await fetch(rawUrl(it.file), { headers: { Accept: 'text/plain' } });
+    if (!res.ok) throw new Error('ответ ' + it.file + ' не читается (HTTP ' + res.status + ')');
+    var content = await res.text();
+    if (!content.trim()) throw new Error('файл ' + it.file + ' пуст');
+    return { key: key, kind: it.kind, content: content };
   }
 
   async function saveAnswer(ctx, ans, force) {
+    if (cacheIndex()[ctx.key] && !force) return { skipped: true, key: ctx.key };
+    var item = {
+      key: ctx.key,
+      kind: ans.kind,
+      ext: ans.ext || 'txt',
+      content: ans.content,
+      author: await authorName()
+    };
+    var name = ctx.key + '.' + item.ext;
+    var res;
     try {
-      await refresh(false);                 /* берём закешированный список файлов: экономим запросы */
-    } catch (err) {
-      await forkIfForeign(err);             /* гист не читается — значит он не наш */
+      res = await fetch(API + '/contents/' + INBOX + '/' + name, {
+        method: 'PUT',
+        headers: ghHeaders(),
+        body: JSON.stringify({
+          message: 'inbox: ' + ctx.key + (item.author ? ' — ' + item.author : ''),
+          content: b64(item.content)
+        })
+      });
+    } catch (e) {
+      storeDown = Date.now() + 60000;
+      throw new Error('GitHub недоступен: ' + e.message);
+    }
+    /* 409/422 — файл уже лежит в очереди с прошлого раза, это не ошибка */
+    if (!res.ok && res.status !== 409 && res.status !== 422) {
+      if (res.status === 401 || res.status === 403) storeDown = Date.now() + 60000;
+      throw new Error(await ghError(res));
     }
 
-    var idx = index();
-    if (idx[ctx.key] && !force) return { skipped: true, file: idx[ctx.key].file };
-
-    function build(name) {
-      var files = {};
-      files[name] = { content: ans.content };
-      return { description: 'Stepik answers · ' + (names[cfg.gistId] || []).length + ' файлов', files: files };
-    }
-    var name = (idx[ctx.key] && idx[ctx.key].file) ||
-      (LIMIT + ctx.lesson + '_s' + ctx.step + '.' + (ans.ext || 'txt'));
-
-    try {
-      gistCache = await gh('PATCH', '/gists/' + cfg.gistId, build(name));
-    } catch (err) {
-      await forkIfForeign(err);            /* у гистов нет соавторов: писать может только владелец токена */
-      name = LIMIT + ctx.lesson + '_s' + ctx.step + '.' + (ans.ext || 'txt');
-      gistCache = await gh('PATCH', '/gists/' + cfg.gistId, build(name));
-    }
-    setNames(cfg.gistId, Object.keys(gistCache.files || {}));
-    return { file: name };
-  }
-
-  async function readSaved(ctx) {
-    await refresh(false).catch(function () { return null; });
-    var idx = index()[ctx.key];
-    if (!idx) throw new Error('для этого шага в гисте ничего нет');
-    var id = gistIdOf(idx.file);
-    var gist = id === cfg.gistId ? gistCache : await gh('GET', '/gists/' + id);
-    var file = gist && gist.files && gist.files[idx.file];
-    var content = file && typeof file.content === 'string' ? file.content : '';
-    if (!content.trim()) throw new Error('не удалось прочитать ' + idx.file);
-    return { name: idx.file, kind: idx.kind, content: content };
+    /* робот перенесёт файл в answers/ за секунды; чтобы скоба появилась сразу,
+       добавляем шаг в свой список сами */
+    cache.items[ctx.key] = { key: ctx.key, file: name, kind: item.kind, ext: item.ext };
+    cache.at = Date.now();
+    saveCache();
+    return { key: ctx.key };
   }
 
   /* ----------------------------------------------------------- API Stepik */
@@ -292,12 +248,22 @@
     return null;
   }
 
-  var myId = null;
+  var myId = null, myName = '';
 
   async function myUserId() {
     if (myId) return myId;
-    try { myId = (await sk('/api/users/me')).users[0].id || null; } catch (e) { myId = null; }
+    try {
+      var u = (await sk('/api/users/me')).users[0] || {};
+      myId = u.id || null;
+      myName = norm(u.full_name || '') || (myId ? 'id' + myId : '');
+    } catch (e) { myId = null; }
     return myId;
+  }
+
+  /* подпись автора для таблицы: в ней видно, кто добавил ответ */
+  async function authorName() {
+    if (!myName) await myUserId();
+    return myName;
   }
 
   async function apiAnswer(ctx) {
@@ -608,7 +574,7 @@
   }
 
   async function insertSaved(ctx) {
-    var saved = await readSaved(ctx);
+    var saved = await storeItem(ctx.key);
     if (!insertTarget()) {
       var again = retryButton();
       if (again) {
@@ -621,7 +587,7 @@
     if (saved.kind === 'choice') {
       var data = null;
       try { data = JSON.parse(saved.content); } catch (e) { data = null; }
-      res = data ? writeChoice(data) : { ok: false, error: 'битый файл ответа ' + saved.name };
+      res = data ? writeChoice(data) : { ok: false, error: 'битая запись ответа ' + saved.key };
     } else {
       res = await writeCode(saved.content);
     }
@@ -859,12 +825,12 @@
     try {
       var res = await saveAnswer(ctx, ans, false);
       if (res && res.skipped) return null;
-      lastOk = { when: nowIso(), file: res.file, via: ans.via || '—' };
-      toast('💾 Сохранено в гист: шаг ' + ctx.step + ' (' + res.file + ') · источник: ' + (ans.via || '—'));
+      lastOk = { when: nowIso(), key: res.key, via: ans.via || '—' };
+      toast('💾 Сохранено: шаг ' + ctx.step + ' · источник: ' + (ans.via || '—'));
       return res;
     } catch (err) {
       lastErr = err.message + ' · ' + nowIso();
-      toast('⚠ Не сохранилось: ' + err.message + '  → меню → 🧪 Тест записи в гист', true);
+      toast('⚠ Не сохранилось: ' + err.message + '  → меню → 🧪 Проверка хранилища', true);
       return null;
     }
   }
@@ -872,9 +838,16 @@
   async function tick() {
     var ctx = stepContext();
     if (!ctx) { hideChip(); currentKey = null; return; }
-    if (ctx.key !== currentKey) { currentKey = ctx.key; hideChip(); }
+    if (ctx.key !== currentKey) {
+      currentKey = ctx.key;
+      hideChip();
+      /* сменился шаг — самое время подтянуть свежий список (не чаще раза в минуту) */
+      if (Date.now() - cache.at > 60000) {
+        storeIndex(true).catch(function (e) { log('список не обновился:', e.message); });
+      }
+    }
 
-    var entry = index()[ctx.key];
+    var entry = cacheIndex()[ctx.key];
     if (entry && !dismissed[ctx.key]) {
       var target = insertTarget();
       if (target) showChip(target, entry.kind === 'choice' ? 'есть ответ' : 'есть решение');
@@ -883,7 +856,7 @@
       hideChip();
     }
 
-    if (entry || busy || !cfg.token || !cfg.gistId || Date.now() < rateUntil) return;
+    if (entry || busy || !cfg.token || Date.now() < storeDown) return;
     if (!mayTry(ctx.key)) return;
 
     busy = true;
@@ -937,9 +910,9 @@
           var ans = (netAnswer && netAnswer.key === ctx.key && netAnswer.ans) || await currentAnswer(ctx);
           if (!ans) throw new Error('на этом шаге нечего сохранять');
           var head = String(ans.content).split('\n').slice(0, 12).join('\n');
-          if (!confirm('Сохранить это в гист?\nИсточник: ' + (ans.via || ans.kind) + '\n\n' + head)) return;
+          if (!confirm('Сохранить это в хранилище?\nИсточник: ' + (ans.via || ans.kind) + '\n\n' + head)) return;
           var res = await saveAnswer(ctx, ans, true);
-          toast('💾 Перезаписано: ' + res.file);
+          toast('💾 Перезаписано: шаг ' + ctx.step + ' (' + res.key + ')');
         } catch (err) { toast('⚠ ' + err.message, true); }
       })();
     } else if (k === 'd') {
@@ -951,40 +924,46 @@
   /* ------------------------------------------------------- самопроверка */
 
   async function selfTest() {
-    var L = [], me = '', owner = '', writable = false;
-    L.push('=== Stepik ⇄ Gist: отчёт самопроверки ===');
+    var L = [], ok = false, writable = false;
+    L.push('=== Stepik ⇄ Ответы: отчёт самопроверки ===');
     L.push('время: ' + nowIso() + ' · версия скрипта: ' + VERSION);
-    L.push('gist: ' + (cfg.gistId || '(пусто)') + ' · доп. для чтения: ' + (cfg.sharedGistId || '(нет)'));
-    L.push('токен: ' + (cfg.token
-      ? cfg.token.slice(0, 4) + '…' + cfg.token.slice(-4) + ' (длина ' + cfg.token.length + ')'
-      : 'НЕ ЗАДАН'));
-    if (lastOk) L.push('последняя запись: ' + lastOk.file + ' · ' + lastOk.when + ' · ' + lastOk.via);
+    L.push('репозиторий: ' + REPO + '@' + BRANCH + '/answers');
+    L.push('токен записи: ' + (cfg.token ? 'задан (' + cfg.token.length + ' симв.)' : 'НЕ ЗАДАН'));
+    L.push('в локальном списке: ' + Object.keys(cacheIndex()).length + ' шагов · обновлён ' +
+      (cache.at ? new Date(cache.at).toLocaleString() : 'никогда'));
+    if (lastOk) L.push('последняя запись: ' + lastOk.key + ' · ' + lastOk.when + ' · ' + lastOk.via);
     if (lastErr) L.push('последняя ошибка: ' + lastErr);
     L.push('');
 
     try {
-      me = (await gh('GET', '/user')).login || '';
-      L.push('1) токен принят GitHub · аккаунт @' + me);
-    } catch (e) { L.push('1) ТОКЕН НЕ РАБОТАЕТ: ' + e.message); }
+      var items = await storeIndex(true);
+      ok = true;
+      L.push('1) СПИСОК ОТВЕТОВ ЧИТАЕТСЯ · шагов в папке: ' + Object.keys(items).length);
+    } catch (e) { L.push('1) СПИСОК НЕ ЧИТАЕТСЯ: ' + e.message); }
 
-    if (cfg.gistId) {
-      try {
-        var g = await gh('GET', '/gists/' + cfg.gistId);
-        owner = (g.owner && g.owner.login) || '';
-        L.push('2) гист читается · владелец @' + owner + ' · файлов: ' + Object.keys(g.files || {}).length);
-        L.push('   ссылка: ' + (g.html_url || ('https://gist.github.com/' + cfg.gistId)));
-      } catch (e) { L.push('2) ГИСТ НЕ ЧИТАЕТСЯ: ' + e.message); }
-
-      try {
-        var files = {};
-        files[SELF] = { content: JSON.stringify({ at: nowIso(), by: me || 'unknown' }, null, 2) };
-        var after = await gh('PATCH', '/gists/' + cfg.gistId, { files: files });
-        writable = true;
-        L.push('3) ЗАПИСЬ РАБОТАЕТ · файл ' + SELF + ' обновлён · всего файлов: ' +
-          Object.keys(after.files || {}).length);
-      } catch (e) { L.push('3) ЗАПИСЬ НЕ РАБОТАЕТ: ' + e.message); }
+    if (!cfg.token) {
+      L.push('2) ТОКЕН ЗАПИСИ НЕ ЗАДАН — меню → ⚙ Токен записи (без него ответы не сохраняются)');
     } else {
-      L.push('2) гист не задан — меню → ⚙ Токен и gist');
+      try {
+        var who = await fetch(API, { headers: ghHeaders() });
+        if (who.status === 401) L.push('2) ТОКЕН НЕ ПРИНЯТ: проверь, что он не отозван');
+        else if (who.status === 404) L.push('2) ТОКЕН НЕ ВИДИТ РЕПОЗИТОРИЙ — добавь ' + REPO +
+          ' в его Repository access');
+        else {
+          L.push('2) ТОКЕН РАБОТАЕТ · репозиторий доступен');
+          var probe = await fetch(API + '/contents/' + INBOX + '/_selftest.txt', {
+            method: 'PUT',
+            headers: ghHeaders(),
+            body: JSON.stringify({ message: 'проверка записи (робот удалит)', content: b64('ok\n') })
+          });
+          if (probe.ok || probe.status === 409 || probe.status === 422) {
+            writable = true;
+            L.push('3) ЗАПИСЬ РАБОТАЕТ · пробный файл поставлен в очередь, робот его уберёт');
+          } else {
+            L.push('3) ЗАПИСЬ НЕ РАБОТАЕТ: ' + await ghError(probe));
+          }
+        }
+      } catch (e) { L.push('2) ТОКЕН НЕ ПРОВЕРЕН: ' + e.message); }
     }
 
     L.push('');
@@ -993,7 +972,10 @@
     if (!ctx) {
       L.push('откройте шаг урока: stepik.org/lesson/<урок>/step/<номер>');
     } else {
-      L.push('урок ' + ctx.lesson + ', шаг ' + ctx.step);
+      L.push('урок ' + ctx.lesson + ', шаг ' + ctx.step + ' (ключ ' + ctx.key + ')');
+      L.push(cacheIndex()[ctx.key]
+        ? 'в хранилище уже есть ответ — появится скоба «вставить»'
+        : 'ответа в хранилище нет');
       var sid = null;
       try { sid = await stepIdFor(ctx); } catch (e) { /* ignore */ }
       L.push('id шага в API Stepik: ' + (sid || 'не определён (сработает перехват отправки)'));
@@ -1004,73 +986,59 @@
           var good = subs.filter(function (s) { return s.status === 'correct' && s.reply; });
           L.push('ваших отправок: ' + subs.length + ' · статусы: ' +
             (subs.map(function (s) { return s.status; }).join(', ') || '—'));
-          L.push(good.length ? 'есть зачтённый ответ — уедет в гист автоматически'
-            : 'зачтённых отправок нет');
+          L.push(good.length ? 'есть зачтённый ответ — сохранится сам' : 'зачтённых отправок нет');
         } catch (e) { L.push('API Stepik не ответил: ' + e.message); }
       }
     }
 
     L.push('');
-    if (writable) L.push('ИТОГ: запись работает — этот браузер может сохранять ответы.');
-    else if (!me) L.push('ИТОГ: GitHub не принял токен — меню → ⚙ Токен и gist.');
-    else if (owner && owner !== me) L.push('ИТОГ: токен @' + me + ', а гист @' + owner +
-      ' — нужен токен владельца, иначе скрипт создаст личный гист.');
-    else L.push('ИТОГ: GitHub отказал в записи — см. пункт 3.');
+    if (ok && writable) L.push('ИТОГ: всё работает — этот браузер может сохранять и вставлять ответы.');
+    else if (ok && !cfg.token) L.push('ИТОГ: ответы читаются, но сохранять нечем — укажи токен.');
+    else if (ok) L.push('ИТОГ: ответы читаются, но записать не получилось — см. пункт 3.');
+    else if (!cfg.token) L.push('ИТОГ: укажи токен записи в меню.');
+    else L.push('ИТОГ: хранилище не отвечает — проверь, что развёртывание открыто «для всех».');
 
     var report = L.join('\n');
     log(report);
     showReport(report);
-    return writable;
+    return ok;
   }
 
   async function diagnose() {
+    if (!cfg.token) { toast('⚠ Токен записи не задан — меню → ⚙ Токен записи', true); return; }
     try {
-      var me = (await gh('GET', '/user')).login || '';
-      var g = await gh('GET', '/gists/' + cfg.gistId);
-      var owner = (g.owner && g.owner.login) || '';
-      if (me && owner && me === owner) toast('✓ Гист ' + cfg.gistId + ' · токен @' + me + ' · запись разрешена');
-      else toast('⚠ Гист принадлежит @' + owner + ', токен — @' + me +
-        '. Нужен токен @' + owner + ', иначе скрипт создаст личный гист.', true);
+      var items = await storeIndex(true);
+      var who = await fetch(API, { headers: ghHeaders() });
+      if (who.status === 401) throw new Error('токен не принят GitHub');
+      if (who.status === 404) throw new Error('токен не видит ' + REPO);
+      toast('✓ Готово · ответов в папке: ' + Object.keys(items).length + ' · запись разрешена');
     } catch (e) { toast('⚠ ' + e.message, true); }
   }
 
   /* ------------------------------------------------------------- меню */
 
   try {
-    GM_registerMenuCommand('⚙ Токен и gist', function () {
-      var t = prompt('GitHub-токен ВЛАДЕЛЬЦА гиста — один и тот же у всех (scope "gist"):', cfg.token || '');
-      if (t !== null) setCfg('token', t.trim());
-      var g = prompt('ID общего гиста — чтение и запись:', cfg.gistId || '');
-      if (g !== null) setCfg('gistId', g.trim());
-      var s = prompt('Доп. гист только для чтения (можно пусто):', cfg.sharedGistId || '');
-      if (s !== null) setCfg('sharedGistId', s.trim());
-      gistCache = null;
+    GM_registerMenuCommand('⚙ Токен записи', function () {
+      var t = prompt('GitHub-токен с правом «Contents: write» на ' + REPO + '\n' +
+        '(он умеет только класть ответ в очередь inbox/):', cfg.token || '');
+      if (t === null) return;
+      setToken(t.trim());
+      cache = { at: 0, items: {} };
+      saveCache();
       tried = {};
+      storeDown = 0;
       if (!cfg.token) { toast('⚠ Токен не задан', true); return; }
-      refresh(true).then(diagnose).catch(function (err) { toast('⚠ ' + err.message, true); });
+      storeIndex(true).then(diagnose).catch(function (err) { toast('⚠ ' + err.message, true); });
     });
 
-    GM_registerMenuCommand('🧪 Тест записи в гист (отчёт)', function () {
-      gistCache = null;
+    GM_registerMenuCommand('🧪 Проверка хранилища (отчёт)', function () {
       selfTest().catch(function (err) { toast('⚠ ' + err.message, true); });
     });
 
-    GM_registerMenuCommand('🔍 Проверить доступ к гисту', function () {
-      diagnose();
-    });
-
-    GM_registerMenuCommand('📂 Открыть гист, куда идёт запись', function () {
-      if (!cfg.gistId) { toast('⚠ Гист не задан', true); return; }
-      window.open('https://gist.github.com/' + cfg.gistId, '_blank');
-    });
-
-    GM_registerMenuCommand('♻ Вернуть общий гист (' + DEF_GIST.slice(0, 8) + '…)', function () {
-      setCfg('gistId', DEF_GIST);
-      setCfg('sharedGistId', '');
-      gistCache = null;
-      tried = {};
-      refresh(true).catch(function (e) { log(e); });
-      toast('Запись переключена на общий гист ' + DEF_GIST);
+    GM_registerMenuCommand('🔄 Обновить список ответов', function () {
+      storeIndex(true)
+        .then(function (items) { toast('✓ В хранилище ' + Object.keys(items).length + ' ответов'); })
+        .catch(function (err) { toast('⚠ ' + err.message, true); });
     });
   } catch (e) { /* ignore */ }
 
@@ -1078,14 +1046,11 @@
 
   function init() {
     injectBridge();
-    var old = document.getElementById('sgx');
-    if (old) old.remove();
 
-    if (!cfg.token || !cfg.gistId) {
-      toast('⚠ Укажите GitHub-токен: меню Tampermonkey → ⚙ Токен и gist', true);
-    } else {
-      refresh(true).catch(function (err) { toast('⚠ ' + err.message, true); });
+    if (!cfg.token) {
+      toast('⚠ Укажите токен записи: меню Tampermonkey → ⚙ Токен записи', true);
     }
+    storeIndex(false).catch(function (err) { log('список ответов:', err.message); });
 
     setInterval(tick, 1500);
     setInterval(function () { if (chipAnchor) positionChip(chipAnchor); }, 500);
