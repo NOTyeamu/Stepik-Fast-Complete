@@ -77,16 +77,30 @@ function makeFetch(state) {
     /* --- проверка токена в отчёте --- */
     if (u === `https://api.github.com/repos/${REPO}`) return state.storeDown ? fail(500) : ok({}, 'json');
 
-    /* --- ИИ (Pollinations): ключа нет, поэтому просто отвечаем как сервис --- */
+    /* --- ИИ, бесплатный канал (Pollinations): ключа нет по определению --- */
     if (u.includes('text.pollinations.ai')) {
-      state.aiCalls.push({ url: u, body: init && init.body });
-      if (state.aiDown) return fail(503);
+      state.aiCalls.push({ url: u, body: init && init.body, auth: init && init.headers && init.headers.Authorization });
+      if (state.aiDown) return fail(402);            /* именно так он отвечает при перегрузе */
       let asked = '';
       try { asked = JSON.parse(init.body).messages.slice(-1)[0].content; } catch (e) { asked = ''; }
       return ok({
         choices: [{ message: { role: 'assistant', content: state.aiText || 'Console.WriteLine(5);' } }],
         model: 'gpt-oss-20b', user_tier: 'anonymous', __asked: asked
       }, 'json');
+    }
+
+    /* --- ИИ, свой канал (ключевой) --- */
+    if (u.includes('api.reformboss.com')) {
+      state.aiPaidCalls.push({ url: u, body: init && init.body, auth: init && init.headers && init.headers.Authorization });
+      if (state.aiPaidDown) return fail(500);
+      let asked = '';
+      let model = '';
+      try { const b = JSON.parse(init.body); asked = b.messages.slice(-1)[0].content; model = b.model; } catch (e) { /* ignore */ }
+      /* reasoning-модель отдаёт размышления отдельным полем — проверяем и это */
+      const msg = state.aiPaidEmpty
+        ? { role: 'assistant', content: '', reasoning_content: 'думал-думал' }
+        : { role: 'assistant', content: state.aiPaidText || 'static void PrintSquare(int x) { }' };
+      return ok({ choices: [{ message: msg }], model: model, __asked: asked }, 'json');
     }
 
     /* --- Stepik --- */
@@ -110,7 +124,7 @@ function makeFetch(state) {
   };
 }
 
-function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiText, aiDown }) {
+function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiText, aiDown, aiPaidDown, aiPaidText, aiPaidEmpty, aiKey }) {
   return new Promise((resolve, reject) => {
     const dom = new JSDOM(html, { url, runScripts: 'dangerously', pretendToBeVisual: true });
     const { window } = dom;
@@ -120,9 +134,12 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       storeDown: !!storeDown, emptyLessonSteps: !!emptyLessonSteps,
       setValue: null, submitted: 0, retried: 0, docBlob: null, shots: 0,
       aiCalls: [], aiText: aiText, aiDown: !!aiDown,
+      aiPaidCalls: [], aiPaidDown: !!aiPaidDown, aiPaidText: aiPaidText,
+      aiPaidEmpty: !!aiPaidEmpty,
       storage: { writeToken: token === undefined ? 'github_pat_11TEST' : token }
     };
     if (job) state.storage.job = JSON.stringify(job);
+    if (aiKey !== undefined) state.storage.aiKey = aiKey;
     if (innerWidth) Object.defineProperty(window, 'innerWidth', { value: innerWidth, configurable: true });
 
     /* скриншот: html2canvas подменяем, реального рендера в jsdom нет */
@@ -177,7 +194,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       'window', 'document', 'location', 'fetch', 'console', 'navigator',
       'GM_getValue', 'GM_setValue', 'GM_addStyle', 'GM_registerMenuCommand',
       'CustomEvent', 'Event', 'KeyboardEvent', 'MouseEvent', 'PopStateEvent',
-      'HTMLTextAreaElement', 'HTMLInputElement', 'TextEncoder', 'btoa',
+      'HTMLTextAreaElement', 'HTMLInputElement', 'TextEncoder', 'btoa', 'atob',
       'html2canvas', 'JSZip', 'URL',
       'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
       SCRIPT
@@ -190,7 +207,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       (k, v) => { state.storage[k] = v; },
       () => {}, (name, fn) => { state.menu[name] = fn; },
       window.CustomEvent, window.Event, window.KeyboardEvent, window.MouseEvent, window.PopStateEvent,
-      window.HTMLTextAreaElement, window.HTMLInputElement, TextEncoder, btoa,
+      window.HTMLTextAreaElement, window.HTMLInputElement, TextEncoder, btoa, atob,
       window.html2canvas, JSZip, window.URL,
       (f, ms) => { const t = setTimeout(f, ms); timers.push(t); return t; },
       clearTimeout,
@@ -207,6 +224,46 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       } catch (e) { reject(e); }
     }, waitMs);
   });
+}
+
+/* Реальная шапка урока (ряд настроек) и реальный сайдбар курса — взяты из
+   присланной разметки, чтобы проверять кнопку и подмену меню на настоящих селекторах. */
+const SHELL_HTML = `
+  <ul class="lesson-controls" role="toolbar" aria-label="Настройки">
+    <li class="lesson-controls__item"><button class="button_style_secondary" type="button" title="Полноэкранный режим"></button></li>
+    <li class="lesson-controls__item"><button class="button_style_secondary" type="button" title="Настройки"></button></li>
+  </ul>
+  <div class="lesson-sidebar__content custom-scrollbar">
+    <nav class="toc-sections lesson-sidebar__toc" aria-label="Навигация по курсу">
+      <div class="lesson-sidebar__module-header sidebar-module-header" data-section="552399"></div>
+      <div class="lesson-sidebar__toc-inner" data-section="552399">
+        <div class="toc-lesson"><a href="/lesson/1755852?unit=1780001" class="lesson-sidebar__lesson">
+          <span class="lesson-sidebar__lesson-name">4.1&nbsp;&nbsp;Знакомство с методами</span></a></div>
+        <div class="toc-lesson"><a href="/lesson/1755853?unit=1780002" class="lesson-sidebar__lesson">
+          <span class="lesson-sidebar__lesson-name">4.2&nbsp;&nbsp;Перегрузка и возврат</span></a></div>
+        <div class="toc-lesson"><a href="/lesson/1755854?unit=1780003" class="lesson-sidebar__lesson">
+          <span class="lesson-sidebar__lesson-name">4.3&nbsp;&nbsp;Массивы</span></a></div>
+      </div>
+    </nav>
+  </div>`;
+
+const SHELL_HTML_FULL = `<!doctype html><html><body>
+  ${SHELL_HTML}
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="step-text">Напишите программу, которая выводит число</div>
+    <div class="CodeMirror"><textarea></textarea></div>
+    <button class="attempt-wrapper-button submit" type="button">Отправить на проверку</button>
+  </div></div>
+</body></html>`;
+
+
+/* Панель со статусом создаётся только по клику и только когда есть сайдбар курса.
+   Если панели нет, берём последнее сообщение из data-атрибута документа — скрипт
+   кладёт его туда всегда, независимо от того, что видно на странице. */
+function statusText(win) {
+  const el = win.document.querySelector('#sgx-status');
+  if (el) return el.textContent;
+  return win.document.documentElement.getAttribute('data-sgx-status') || '';
 }
 
 const HTML = `<!doctype html><html><body>
@@ -239,12 +296,26 @@ const THEORY_HTML = `<!doctype html><html><body>
   </div></div>
 </body></html>`;
 
+/* Сайдбар курса с четырьмя уроками — структура как у настоящего Stepik:
+   прокручиваемая область .lesson-sidebar__content и внутри неё навигация. */
 const SIDEBAR_HTML = `<!doctype html><html><body>
-  <div class="lesson-navigation">
-    <a href="/lesson/1755852">4.1 Знакомство с методами</a>
-    <a href="/lesson/1755853">4.2 Перегрузка и возвращаемое значение</a>
-    <a href="/lesson/1755854">4.3 Массивы и возврат значения</a>
-    <a href="/lesson/1755855">4.4 Рекурсивные методы</a>
+  <ul class="lesson-controls" role="toolbar" aria-label="Настройки">
+    <li class="lesson-controls__item"><button class="button_style_secondary" type="button" title="Полноэкранный режим"></button></li>
+    <li class="lesson-controls__item"><button class="button_style_secondary" type="button" title="Настройки"></button></li>
+  </ul>
+  <div class="lesson-sidebar__content custom-scrollbar">
+    <nav class="toc-sections lesson-sidebar__toc" aria-label="Навигация по курсу">
+      <div class="lesson-sidebar__toc-inner" data-section="552399">
+        <div class="toc-lesson"><a href="/lesson/1755852?unit=1780001" class="lesson-sidebar__lesson">
+          <span class="lesson-sidebar__lesson-name">4.1&nbsp;&nbsp;Знакомство с методами</span></a></div>
+        <div class="toc-lesson"><a href="/lesson/1755853?unit=1780002" class="lesson-sidebar__lesson">
+          <span class="lesson-sidebar__lesson-name">4.2&nbsp;&nbsp;Перегрузка и возврат</span></a></div>
+        <div class="toc-lesson"><a href="/lesson/1755854?unit=1780003" class="lesson-sidebar__lesson">
+          <span class="lesson-sidebar__lesson-name">4.3&nbsp;&nbsp;Массивы</span></a></div>
+        <div class="toc-lesson"><a href="/lesson/1755855?unit=1780004" class="lesson-sidebar__lesson">
+          <span class="lesson-sidebar__lesson-name">4.4&nbsp;&nbsp;Рекурсивные методы</span></a></div>
+      </div>
+    </nav>
   </div>
   <div class="attempt-wrapper"><div class="attempt-wrapper__content">
     <div class="step-text">Задание</div>
@@ -426,15 +497,22 @@ const AI_HTML = `<!doctype html><html><body>
     }
   });
 
-  console.log('\n=== 10. панель открывается только из меню ===');
+  console.log('\n=== 10. панель открывается из меню, в сайдбаре и в стиле сайта ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    store: {}, submissions: [], html: HTML, waitMs: 2000,
+    store: {}, submissions: [], html: SHELL_HTML_FULL, waitMs: 2000,
     afterRun: async (win, st) => {
+      const nav = win.document.querySelector('.lesson-sidebar__toc');
+      const content = win.document.querySelector('.lesson-sidebar__content');
+      check('на странице нет кнопки «от и до»', !win.document.querySelector('#sgx-fab'));
+      check('панели на странице нет, пока её не открыли', !win.document.querySelector('#sgx-panel'));
+
+      st.menu['📄 Пройти задания / собрать в Word']();
       const panel = win.document.querySelector('#sgx-panel');
-      check('панель создана', !!panel);
-      check('на странице её не видно', !panel.classList.contains('on'));
-      check('кнопки «от и до» на странице нет', !win.document.querySelector('#sgx-fab'));
+      check('меню создало и открыло панель', !!panel && panel.classList.contains('on'));
+      check('панель встала в боковое меню курса', panel.parentNode === content,
+        panel.parentNode && panel.parentNode.className);
+      check('список уроков спрятан', nav.classList.contains('sgx-sidebar-hidden'), nav.className);
       check('есть список «с»', !!win.document.querySelector('#sgx-from-l'));
       check('есть список «по»', !!win.document.querySelector('#sgx-to-l'));
       check('нет переключателя «уроки / шаги»', !win.document.querySelector('#sgx-mode'));
@@ -445,10 +523,69 @@ const AI_HTML = `<!doctype html><html><body>
       check('«Собрать в Word» с иконкой',
         /Собрать в Word/.test(collect.textContent) && !!collect.querySelector('svg'), collect.textContent);
       check('есть кнопка закрытия', !!win.document.querySelector('#sgx-panel .sgx-close'));
-      st.menu['📄 Пройти задания / собрать в Word']();
-      check('меню открывает панель', panel.classList.contains('on'));
       win.document.querySelector('#sgx-panel .sgx-close').click();
       check('крестик закрывает панель', !panel.classList.contains('on'));
+      check('крестик возвращает уроки', !nav.classList.contains('sgx-sidebar-hidden'), nav.className);
+    }
+  });
+
+  console.log('\n=== 10b. без меню курса панель не подменяет наугад, а честно говорит ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: HTML, waitMs: 2000,
+    afterRun: async (win, st) => {
+      st.menu['📄 Пройти задания / собрать в Word']();
+      check('панель не появилась — подменять нечего', !win.document.querySelector('#sgx-panel'));
+      const toast = win.document.querySelector('#sgx-toast');
+      check('человеку сказано, что меню курса не видно',
+        !!toast && /боковое меню/i.test(toast.textContent), toast && toast.textContent);
+    }
+  });
+
+  console.log('\n=== 10a. кнопка живёт в шапке урока, панель занимает место уроков ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: SHELL_HTML_FULL, waitMs: 2200,
+    afterRun: async (win) => {
+      const bar = win.document.querySelector('.lesson-controls');
+      const btn = win.document.querySelector('.lesson-controls #sgx-tools-btn');
+      check('кнопка вставлена в ряд настроек урока', !!btn);
+      check('кнопка — отдельный пункт ряда (как полноэкранный режим)',
+        btn && btn.tagName === 'LI' && btn.className.indexOf('lesson-controls__item') >= 0,
+        btn && btn.className);
+      check('кнопка одета в родной класс сайта',
+        !!win.document.querySelector('#sgx-tools-btn .button_style_secondary'));
+      check('ряд настроек не перестроен: три пункта', bar.children.length === 3, String(bar.children.length));
+
+      const nav = win.document.querySelector('.lesson-sidebar__toc');
+      const content = win.document.querySelector('.lesson-sidebar__content');
+      check('до нажатия панели нет', !win.document.querySelector('#sgx-panel'));
+      check('до нажатия уроки видны', !nav.classList.contains('sgx-sidebar-hidden'), nav.className);
+
+      win.document.querySelector('#sgx-tools-btn button').click();
+      /* панель создаётся по клику — берём её после, а не заранее */
+      const panel = win.document.querySelector('#sgx-panel');
+      check('кнопка создала и открыла панель', !!panel && panel.classList.contains('on'));
+      check('панель лежит внутри бокового меню курса', !!panel && panel.parentNode === content,
+        panel && panel.parentNode && panel.parentNode.className);
+      check('список уроков спрятан', nav.classList.contains('sgx-sidebar-hidden'), nav.className);
+      check('в панели есть все четыре функции',
+        !!win.document.querySelector('#sgx-solve') && !!win.document.querySelector('#sgx-collect') &&
+        !!win.document.querySelector('#sgx-ai-btn') && !!win.document.querySelector('#sgx-stop'));
+      check('в панели есть «с» и «по»',
+        !!win.document.querySelector('#sgx-from-l') && !!win.document.querySelector('#sgx-to-l'));
+      check('уроки в «с» подтянулись из меню курса',
+        win.document.querySelectorAll('#sgx-from-l option').length === 3,
+        String(win.document.querySelectorAll('#sgx-from-l option').length));
+
+      win.document.querySelector('#sgx-panel .sgx-close').click();
+      check('крестик вернул уроки', !nav.classList.contains('sgx-sidebar-hidden'), nav.className);
+      check('панель спряталась', !panel.classList.contains('on'));
+      check('панель осталась в сайдбаре и переоткроется', panel.parentNode === content);
+
+      /* повторное нажатие кнопки должно снова открыть, а не «залипнуть» */
+      win.document.querySelector('#sgx-tools-btn button').click();
+      check('кнопка открывает панель повторно', panel.classList.contains('on'));
     }
   });
 
@@ -476,8 +613,7 @@ const AI_HTML = `<!doctype html><html><body>
       check('нажата именно «Отправить на проверку»', st.submitted === 1, 'кликов: ' + st.submitted);
       check('«Решить снова» не нажата', st.retried === 0, 'кликов: ' + st.retried);
       check('обход завершён', JSON.parse(st.storage.job || 'null') === null, st.storage.job);
-      check('статус говорит «готово»', /готово/.test(win.document.querySelector('#sgx-status').textContent),
-        win.document.querySelector('#sgx-status').textContent);
+      check('сказано «готово»', /готово/.test(statusText(win)), statusText(win));
     }
   });
 
@@ -490,8 +626,8 @@ const AI_HTML = `<!doctype html><html><body>
       check('скриншот снят', st.shots === 1, st.shots);
       check('документ собран', !!st.docBlob, String(st.docBlob));
       check('обход завершён', JSON.parse(st.storage.job || 'null') === null);
-      check('статус про документ', /документ|скриншот/.test(win.document.querySelector('#sgx-status').textContent),
-        win.document.querySelector('#sgx-status').textContent);
+      check('статус про документ', /документ|скриншот/.test(statusText(win)),
+        statusText(win));
     }
   });
 
@@ -521,6 +657,8 @@ const AI_HTML = `<!doctype html><html><body>
     },
     submissions: [], html: SIDEBAR_HTML, waitMs: 3000,
     afterRun: async (win, st) => {
+      /* панель теперь открывается по кнопке и живёт в сайдбаре */
+      win.document.querySelector('#sgx-tools-btn button').click();
       const sel = win.document.querySelector('#sgx-from-l');
       const opts = sel.querySelectorAll('option');
       check('в списке только уроки с ответами (в меню 4 урока, ответы у трёх)',
@@ -580,8 +718,8 @@ const AI_HTML = `<!doctype html><html><body>
       check('задание отправлено, а не пропущено', st.submitted === 1, 'кликов: ' + st.submitted);
       check('обход дошёл до конца', JSON.parse(st.storage.job || 'null') === null);
       check('в статусе нет ошибок',
-        !/не смог|пропускаю/.test(win.document.querySelector('#sgx-status').textContent),
-        win.document.querySelector('#sgx-status').textContent);
+        !/не смог|пропускаю/.test(statusText(win)),
+        statusText(win));
     }
   });
 
@@ -610,8 +748,8 @@ const AI_HTML = `<!doctype html><html><body>
     afterRun: async (win, st) => {
       check('шаг пропущен, обход закончен', JSON.parse(st.storage.job || 'null') === null,
         st.storage.job);
-      check('в статусе «готово»', /готово/.test(win.document.querySelector('#sgx-status').textContent),
-        win.document.querySelector('#sgx-status').textContent);
+      check('в статусе «готово»', /готово/.test(statusText(win)),
+        statusText(win));
     }
   });
 
@@ -624,9 +762,9 @@ const AI_HTML = `<!doctype html><html><body>
       check('скриншот не снимался', st.shots === 0, 'снимков: ' + st.shots);
       check('обход закончен', JSON.parse(st.storage.job || 'null') === null, st.storage.job);
       check('статус говорит про «не код»', /не код|скриншот/.test(
-        win.document.querySelector('#sgx-status').textContent) ||
-        /готово/.test(win.document.querySelector('#sgx-status').textContent),
-        win.document.querySelector('#sgx-status').textContent);
+        statusText(win)) ||
+        /готово/.test(statusText(win)),
+        statusText(win));
     }
   });
 
@@ -653,8 +791,8 @@ const AI_HTML = `<!doctype html><html><body>
       check('в плане только задания с кодом из ответов, а не все подряд',
         job1 && job1.plan.length === 3, job1 && job1.plan.length); /* 3 ответа с кодом */
       check('в статусе видно попытку перехода',
-        /перехожу|собираю|скриншот/.test(win.document.querySelector('#sgx-status').textContent),
-        win.document.querySelector('#sgx-status').textContent);
+        /перехожу|собираю|скриншот/.test(statusText(win)),
+        statusText(win));
       check('полоска прогресса на странице показана',
         !!win.document.querySelector('#sgx-progress'));
     }
@@ -701,7 +839,7 @@ const AI_HTML = `<!doctype html><html><body>
         win.location.pathname === `/lesson/${LESSON}/step/1`, win.location.pathname);
       check('обход не остался висеть',
         JSON.parse(st.storage.job || 'null') === null, st.storage.job);
-      const status = win.document.querySelector('#sgx-status').textContent;
+      const status = statusText(win);
       check('статус говорит про готовый документ', /готово|документ/.test(status), status);
     }
   });
@@ -741,12 +879,14 @@ const AI_HTML = `<!doctype html><html><body>
     afterRun: async (win, st) => {
       const before = JSON.parse(st.storage.job || 'null');
       check('обход на месте перед проверкой', !!before, st.storage.job);
+
+      /* панель открываем кнопкой в шапке — до этого её в документе нет */
+      win.document.querySelector('#sgx-tools-btn button').click();
       check('кнопка «Собрать в Word» заблокирована, пока идёт обход',
         win.document.querySelector('#sgx-collect').disabled === true,
         'disabled=' + win.document.querySelector('#sgx-collect').disabled);
 
       /* кнопки во время обхода заблокированы — второй обход физически не запустить */
-      st.menu['📄 Пройти задания / собрать в Word']();
       win.document.querySelector('#sgx-collect').click();
       win.document.querySelector('#sgx-solve').click();
       await new Promise((r) => setTimeout(r, 100));
@@ -792,11 +932,14 @@ const AI_HTML = `<!doctype html><html><body>
   console.log('\n=== 25. ИИ недоступен → сказано внятно, ничего не сломано ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    store: {}, submissions: [], html: AI_HTML, waitMs: 3000, aiDown: true,
+    /* «недоступен» — это когда молчат ОБА канала: с одним бесплатным, который упал,
+       скрипт обязан уйти в свой ключ, и это не ошибка, а работа (сценарий 28) */
+    store: {}, submissions: [], html: AI_HTML, waitMs: 10000,
+    aiDown: true, aiPaidDown: true,
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
-      await new Promise((r) => setTimeout(r, 1500));
-      const status = win.document.querySelector('#sgx-status').textContent;
+      await new Promise((r) => setTimeout(r, 9000));
+      const status = statusText(win);
       check('сказано, что ИИ не ответил', /ИИ не ответил/.test(status), status);
       check('окно с решением не открылось', !win.document.querySelector('#sgx-ai'));
       check('редактор не тронут', st.setValue === null);
@@ -814,7 +957,7 @@ const AI_HTML = `<!doctype html><html><body>
       await new Promise((r) => setTimeout(r, 600));
       check('второй запрос не ушёл — сработал лимит', st.aiCalls.length === 1,
         'запросов: ' + st.aiCalls.length);
-      const status = win.document.querySelector('#sgx-status').textContent;
+      const status = statusText(win);
       check('сказано, сколько подождать', /подожди \d+ с|лимит/.test(status), status);
     }
   });
@@ -831,6 +974,111 @@ const AI_HTML = `<!doctype html><html><body>
       check('кнопка ИИ в скобе спрятана (ответ уже есть)',
         chip && !chip.classList.contains('sgx-no-answer'), chip && chip.className);
       check('к ИИ не обращались', st.aiCalls.length === 0);
+    }
+  });
+
+  console.log('\n=== 28. HTTP 402 у бесплатного → переход на свой канал ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 12000,
+    aiDown: true,                                   /* ровно та ошибка, что видит человек */
+    aiPaidText: 'static void PrintSquare(int x)\n{\n    Console.WriteLine(x * x * x);\n}',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      /* бесплатный пробуется дважды на модель × две модели, между попытками 0,7 с —
+         ждём с запасом, иначе проверка ловит процесс на середине */
+      await new Promise((r) => setTimeout(r, 8000));
+
+      check('бесплатный канал попробован', st.aiCalls.length >= 1, 'попыток: ' + st.aiCalls.length);
+      check('после отказа пошли в свой канал', st.aiPaidCalls.length >= 1,
+        'попыток: ' + st.aiPaidCalls.length);
+      const paid = st.aiPaidCalls[0];
+      check('в свой канал ушёл ключ в заголовке',
+        /^Bearer .+/.test((paid && paid.auth) || ''), String(paid && paid.auth).slice(0, 12) + '…');
+      check('в теле своего запроса ключа нет',
+        !/sk-|Bearer|github_pat/i.test(paid.body || ''), 'тело чистое');
+      check('модель — быстрая, не reasoning',
+        JSON.parse(paid.body).model === 'glm-5.3-flash', JSON.parse(paid.body).model);
+
+      const box = win.document.querySelector('#sgx-ai');
+      check('окно с решением открылось', !!box);
+      check('в окне ответ своего канала',
+        /PrintSquare/.test((box && box.querySelector('.sgx-ai-text').value) || ''),
+        box && box.querySelector('.sgx-ai-text').value);
+      check('подписано, каким каналом решено',
+        /свой ключ/.test(box.querySelector('.sgx-ai-note').textContent),
+        box.querySelector('.sgx-ai-note').textContent);
+      check('ничего не вставлено и не отправлено', st.setValue === null && st.submitted === 0);
+    }
+  });
+
+  console.log('\n=== 29. оба канала молчат → понятное объяснение, а не «HTTP 500» ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 12000,
+    aiDown: true, aiPaidDown: true,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 9000));
+      const status = statusText(win);
+      check('сказано, что бесплатный исчерпал лимит', /402/.test(status), status);
+      check('сказано про свой канал', /свой ключ/.test(status), status);
+      check('окно не открылось', !win.document.querySelector('#sgx-ai'));
+      check('редактор не тронут', st.setValue === null);
+    }
+  });
+
+  console.log('\n=== 30. ключ можно убрать: остаётся только бесплатный канал ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 5000,
+    /* '' — это «человек сам очистил поле», и оно должно значить «своего канала нет».
+       Раньше пустая строка молча возвращала встроенный ключ, и убрать его было нельзя. */
+    aiKey: '', aiDown: true, aiPaidText: 'не должно быть использовано',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      /* ждём столько же, сколько и в сценарии 28: проверка «не пошли» имеет смысл
+         только если бы было время сходить */
+      await new Promise((r) => setTimeout(r, 8000));
+      check('в свой канал не пошли — ключа нет', st.aiPaidCalls.length === 0,
+        'попыток: ' + st.aiPaidCalls.length);
+      check('про свой ключ даже не упомянуто',
+        !/свой ключ/.test(statusText(win)),
+        statusText(win));
+    }
+  });
+
+  console.log('\n=== 30a. ключ не задан вовсе → встроенный подхватывается ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 12000,
+    /* aiKey не передаём: значит в памяти его нет и должен сработать встроенный */
+    aiDown: true, aiPaidText: 'static void FromBuiltIn() { }',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 8000));
+      check('со встроенным ключом свой канал работает', st.aiPaidCalls.length >= 1,
+        'попыток: ' + st.aiPaidCalls.length);
+      const box = win.document.querySelector('#sgx-ai');
+      check('и решение показано', !!box && /FromBuiltIn/.test(box.querySelector('.sgx-ai-text').value),
+        box ? box.querySelector('.sgx-ai-text').value : 'окна нет');
+    }
+  });
+
+  console.log('\n=== 31. reasoning-модель без content → берём размышления, а не пусто ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 12000,
+    aiDown: true, aiPaidEmpty: true,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 9000));
+      const box = win.document.querySelector('#sgx-ai');
+      check('пустой ответ не остался незамеченным', st.aiPaidCalls.length >= 1);
+      check('окно открылось с тем, что модель всё-таки отдала',
+        !!box && /думал-думал/.test(box.querySelector('.sgx-ai-text').value),
+        box ? box.querySelector('.sgx-ai-text').value : 'окна нет');
+      check('в редактор по-прежнему ничего не попало', st.setValue === null);
     }
   });
 

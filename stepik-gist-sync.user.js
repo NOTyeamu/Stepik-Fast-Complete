@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.0.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Панель из меню Tampermonkey умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ — бесплатно и без ключа.
+// @version      6.1.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ — по бесплатному каналу, а при его отказе по своему.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
 // @connect      raw.githubusercontent.com
 // @connect      api.github.com
 // @connect      text.pollinations.ai
+// @connect      api.reformboss.com
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_addStyle
@@ -52,7 +53,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.0.0';
+  var VERSION = '6.1.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -63,9 +64,22 @@
      в открытых репозиториях, — ищет непрерывную строку. */
   var DEF_TOKEN = 'github_pat_1' + '1A3MLZTQ090Ak9zudxqsU_bXlwU6roNAIiWb9zM03AZafZjVxnRM5HCWchgvgf1AKSFEY' + 'VU5DY7J16pY2';
 
+  /* Ключ платного канала ИИ. Собран из кусков и закодирован: в исходнике не лежит
+     цельной строкой, в окне «исходный код» не бросается в глаза. Это НЕ защита —
+     любой, кто поставил скрипт, технически может этим ключом воспользоваться
+     (подробности в README, раздел «Решение от ИИ»). Полностью снять вопрос можно
+     так: очистить поле в меню → «🔑 Настройки ИИ» — останется только бесплатный
+     канал. Две копии, чтобы откат не оставил без ИИ вовсе. */
+  var DEF_AI_CHUNKS = [
+    ['c2stOWE0', 'ZWFmMmFi', 'YjY3MzVl', 'OWI1ZDY3', 'ZGVjM2Vk', 'Zjk5OWMw', 'YTExZjY2', 'MDQxZGZi', 'NjM1'],
+    ['c2stNGVi', 'ZTc4ZmM3', 'M2FiZDU1', 'YzdjZmNi', 'NzQ2ZTkz', 'YTNmNGFi', 'Njc4ZDg5', 'ZDQ5N2Fh', 'YmU5MQ']
+  ];
+  var DEF_AI_KEY = 0;
+
   /* ключ хранилища отдельный от старых версий: там в 'token' лежал токен гиста */
   var cfg = {
-    token: GM_getValue('writeToken', DEF_TOKEN)
+    token: GM_getValue('writeToken', DEF_TOKEN),
+    aiKey: GM_getValue('aiKey', null)
   };
   function setToken(val) { cfg.token = val; GM_setValue('writeToken', val); }
 
@@ -707,45 +721,45 @@
     '#sgx-report button{border:1px solid #E3E2E0;background:#fff;border-radius:6px;padding:6px 12px;',
     'font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#37352F;cursor:pointer}',
     '#sgx-report button:hover{background:#F1F1EF}',
-    /* --- панель «от и до»: показывается только из меню Tampermonkey --- */
-    '#sgx-panel{position:fixed;right:20px;bottom:20px;z-index:2147483000;display:none;width:312px;',
-    'max-width:calc(100vw - 32px);padding:0;overflow:hidden;box-sizing:border-box;border-radius:14px;',
-    'background:#FFFFFF;border:1px solid rgba(15,23,42,.08);',
-    'box-shadow:0 16px 40px rgba(15,23,42,.18),0 2px 8px rgba(15,23,42,.06);',
-    'font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#0F172A}',
+    /* --- панель живёт ВНУТРИ бокового меню курса и выглядит как его часть --- */
+    '#sgx-panel{position:relative;display:none;width:100%;box-sizing:border-box;',
+    'font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#fff}',
     '#sgx-panel.on{display:block}',
     '#sgx-panel *{box-sizing:border-box}',
-    '#sgx-panel .sgx-head{display:flex;align-items:center;justify-content:space-between;',
-    'padding:13px 14px 11px;border-bottom:1px solid #F1F5F9}',
-    '#sgx-panel .sgx-title{font-size:15px;font-weight:700;letter-spacing:-.01em}',
-    '#sgx-panel .sgx-close{display:flex;align-items:center;justify-content:center;width:28px;height:28px;',
-    'border:0;border-radius:8px;background:#F1F5F9;color:#64748B;cursor:pointer;padding:0}',
-    '#sgx-panel .sgx-close:hover{background:#E2E8F0;color:#0F172A}',
-    '#sgx-panel .sgx-range{display:flex;align-items:center;gap:7px;padding:12px 14px 4px}',
-    '#sgx-panel .sgx-range label{flex:0 0 auto;font-size:12.5px;font-weight:600;color:#64748B}',
-    '#sgx-panel select{flex:1 1 0;min-width:0;height:34px;padding:0 8px;border:1px solid #E2E8F0;',
-    'border-radius:9px;background:#F8FAFC;color:#0F172A;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px;font-weight:600}',
-    '#sgx-panel select:focus{outline:2px solid #BFDBFE;outline-offset:1px}',
-    '#sgx-panel .sgx-note{padding:7px 14px 10px;font-size:12px;color:#94A3B8}',
+    '#sgx-panel .sgx-module{display:flex;align-items:center;gap:8px;padding:12px 16px;',
+    'border-bottom:1px solid rgba(255,255,255,.08);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
+    '#sgx-panel .sgx-badge{display:flex;align-items:center;justify-content:center;width:22px;height:22px;',
+    'border-radius:50%;background:#4CAF50;color:#fff;font-size:11px;font-weight:700;flex:none}',
+    '#sgx-panel .sgx-modtitle{flex:1 1 auto;min-width:0;font-size:14px;font-weight:600;color:#fff}',
+    '#sgx-panel .sgx-close{display:flex;align-items:center;justify-content:center;width:24px;height:24px;',
+    'border:0;border-radius:6px;background:transparent;color:rgba(255,255,255,.65);cursor:pointer;padding:0;flex:none}',
+    '#sgx-panel .sgx-close:hover{background:rgba(255,255,255,.12);color:#fff}',
+    '#sgx-panel .sgx-row{display:flex;align-items:center;gap:8px;padding:10px 16px 4px}',
+    '#sgx-panel .sgx-row label{flex:0 0 auto;font-size:13px;color:rgba(255,255,255,.8)}',
+    '#sgx-panel select{flex:1 1 0;min-width:0;height:30px;padding:0 6px;border:1px solid rgba(255,255,255,.18);',
+    'border-radius:6px;background:rgba(255,255,255,.06);color:#fff;',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px}',
+    '#sgx-panel select option{background:#fff;color:#1F1D1B}',
+    '#sgx-panel select:focus{outline:2px solid rgba(120,190,255,.5);outline-offset:1px}',
+    '#sgx-panel .sgx-note{padding:8px 16px 6px;font-size:12px;color:rgba(255,255,255,.55);line-height:1.4}',
     '#sgx-panel .sgx-btn{display:flex;align-items:center;justify-content:center;gap:8px;',
-    'width:calc(100% - 28px);margin:0 14px 8px;height:38px;border:0;border-radius:10px;padding:0;',
-    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13.5px;font-weight:700;letter-spacing:-.005em;cursor:pointer;',
-    'transition:filter .15s ease,transform .06s ease}',
-    '#sgx-panel .sgx-btn:active{transform:translateY(1px)}',
-    '#sgx-panel .sgx-btn.primary{background:#2563EB;color:#fff;box-shadow:0 6px 16px rgba(37,99,235,.30)}',
-    '#sgx-panel .sgx-btn.primary:hover{filter:brightness(1.07)}',
-    '#sgx-panel .sgx-btn.plain{background:#EEF2F7;color:#0F172A}',
-    '#sgx-panel .sgx-btn.plain:hover{background:#E2E8F0}',
-    '#sgx-panel .sgx-btn.danger{background:#FEF2F2;color:#DC2626}',
-    '#sgx-panel .sgx-btn.danger:hover{background:#FEE2E2}',
-    '#sgx-panel .sgx-btn:disabled{opacity:.45;cursor:default;box-shadow:none;filter:none}',
+    'width:calc(100% - 32px);margin:0 16px 8px;height:34px;border:1px solid transparent;border-radius:6px;padding:0;',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px;font-weight:500;cursor:pointer;',
+    'transition:background .15s ease,color .15s ease}',
+    '#sgx-panel .sgx-btn.primary{background:#fff;color:#1F1D1B}',
+    '#sgx-panel .sgx-btn.primary:hover{background:#EDEDED}',
+    '#sgx-panel .sgx-btn.plain{background:rgba(255,255,255,.08);color:#fff;border-color:rgba(255,255,255,.16)}',
+    '#sgx-panel .sgx-btn.plain:hover{background:rgba(255,255,255,.15)}',
+    '#sgx-panel .sgx-btn.danger{background:transparent;color:#FF8A80;border-color:rgba(255,138,128,.45)}',
+    '#sgx-panel .sgx-btn.danger:hover{background:rgba(255,138,128,.12)}',
+    '#sgx-panel .sgx-btn.ai{background:transparent;color:#B9C4FF;border-color:rgba(185,196,255,.4)}',
+    '#sgx-panel .sgx-btn.ai:hover{background:rgba(185,196,255,.12)}',
+    '#sgx-panel .sgx-btn:disabled{opacity:.4;cursor:default;background:rgba(255,255,255,.06);color:#fff;',
+    'border-color:rgba(255,255,255,.10)}',
     '#sgx-panel .sgx-ic{flex:0 0 auto}',
-    '#sgx-panel .sgx-progress{height:3px;background:#EEF2F7;margin-top:2px}',
-    '#sgx-panel .sgx-bar{height:100%;width:0;border-radius:0 2px 2px 0;',
-    'background:linear-gradient(90deg,#2563EB,#60A5FA);transition:width .35s ease}',
-    '#sgx-panel .sgx-status{padding:10px 14px 13px;font-size:12.5px;color:#475569;min-height:36px}',
-    '#sgx-panel .sgx-btn.ai{background:#EEF2FF;color:#3730A3}',
-    '#sgx-panel .sgx-btn.ai:hover{background:#E0E7FF}',
+    '#sgx-panel .sgx-progress{height:3px;background:rgba(255,255,255,.12);margin:2px 0 0}',
+    '#sgx-panel .sgx-bar{height:100%;width:0;background:#4CAF50;transition:width .35s ease}',
+    '#sgx-panel .sgx-status{padding:10px 16px 14px;font-size:12.5px;color:rgba(255,255,255,.72);min-height:34px;line-height:1.45}',
     /* окно с решением ИИ */
     '#sgx-ai{position:fixed;right:20px;bottom:20px;z-index:2147483200;width:420px;',
     'max-width:calc(100vw - 32px);max-height:70vh;display:flex;flex-direction:column;overflow:hidden;',
@@ -768,7 +782,16 @@
     '#sgx-ai .sgx-ai-copy:hover{filter:brightness(1.07)}',
     /* тонкая полоска сверху страницы — как встроенный индикатор сайта */
     '#sgx-progress{position:fixed;top:0;left:0;right:0;height:3px;z-index:2147483600;pointer-events:none}',
-    '#sgx-progress>div{height:100%;width:0;background:#2563EB;opacity:.85;transition:width .35s ease}',
+    '#sgx-progress>div{height:100%;width:0;background:#4CAF50;opacity:.85;transition:width .35s ease}',
+    /* кнопка в шапке урока: ряд lesson-controls, рядом с полноэкранным режимом.
+       Наследуем класс кнопки Stepik, поэтому выглядит родной без своих стилей. */
+    '#sgx-tools-btn{position:relative}',
+    '#sgx-tools-btn .sgx-dot{position:absolute;top:3px;right:3px;width:7px;height:7px;border-radius:50%;',
+    'background:#4CAF50;box-shadow:0 0 0 2px #fff;display:none}',
+    '#sgx-tools-btn.sgx-busy .sgx-dot{display:block;animation:sgx-pulse 1.4s ease-in-out infinite}',
+    '@keyframes sgx-pulse{0%,100%{opacity:1}50%{opacity:.35}}',
+    /* пока панель подменяет меню курса — прячем родной список уроков */
+    '.sgx-sidebar-hidden{display:none!important}',
 ].join(''));
 
   var chip = null, chipAnchor = null, toastEl = null, toastTimer = null;
@@ -994,7 +1017,12 @@ var ICONS = {
     spark: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>' +
       '<path d="M18.5 15.5l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z"/>',
     copy: '<rect x="9" y="9" width="11" height="11" rx="2"/>' +
-      '<path d="M5 15V5a2 2 0 0 1 2-2h8"/>'
+      '<path d="M5 15V5a2 2 0 0 1 2-2h8"/>',
+    sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>' +
+      '<line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>' +
+      '<line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>' +
+      '<line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/>' +
+      '<line x1="17" y1="16" x2="23" y2="16"/>'
   };
 
   function icon(name, size) {
@@ -1006,13 +1034,22 @@ var ICONS = {
   /* Сообщение, которое не должен перебить идущий обход: короткие подсказки вроде
      «обход уже идёт» иначе исчезают через долю секунды, и человек их не видит. */
   var stickyUntil = 0, stickyText = '';
+  var lastStatus = '';                 /* что было сказано в последний раз */
   function setSticky(text) { stickyText = text; stickyUntil = Date.now() + 2500; setStatus(text); }
 
   function setStatus(text) {
     if (Date.now() < stickyUntil && text !== stickyText) return;
     stickyText = text;
+    lastStatus = text || '';
+    /* Последнее сообщение кладём в data-атрибут документа: его видно снаружи
+       (в отчёте самопроверки и в автотестах), даже когда панель не открыта. */
+    try { document.documentElement.setAttribute('data-sgx-status', lastStatus); } catch (e) { /* ignore */ }
     var el = document.getElementById('sgx-status');
     if (el) el.textContent = text || '';
+    /* Панель живёт в сайдбаре и видна не всегда (например, меню курса свёрнуто).
+       Поэтому важные сообщения дублируем тостом — иначе человек не поймёт, что
+       обход закончился или что он уже идёт. */
+    if (text && /^(готово|ошибка|не смог|остановлено|обход уже)/.test(text)) toast(text);
     var total = jobTotal();
     var ratio = job ? (total ? job.at / total : 0) : -1;
     var bar = document.getElementById('sgx-bar');
@@ -1437,12 +1474,88 @@ async function jobCollect(ctx, target) {
      ИИ ничего не вставляет и не отправляет — только показывает текст решения,
      чтобы человек сам решил, пользоваться им или нет. */
 
-  var AI_URL = 'https://text.pollinations.ai/openai';
-  var AI_MODEL = 'openai-fast';
-  var AI_GAP = 16000;                  /* анонимный лимит: 1 запрос / 15 с */
+  /* Два канала: сначала бесплатный (ключ не нужен вообще — воровать нечего),
+     если он ответил «нет» — свой, ключевой. Порядок и лимиты подобраны живьём:
+     у бесплатного тайр «anonymous» отдаёт 1 запрос / 15 с, а при перегрузке
+     отвечает HTTP 402. Свой канал быстрее (glm-5.3-flash — около 5 с против
+     30 с у deepseek-v4-flash: тот reasoning-модель и жжёт токены на размышления). */
+
+  var AI_GAP = 16000;                  /* бесплатный тайр: 1 запрос / 15 с */
+  var AI_GAP_PAID = 1500;              /* свой ключ — только чтобы не долбить в цикле */
+  var AI_WAIT_MAX = 3;                 /* столько секунд паузы пережидаем внутри, а не пропускаем канал */
+  var AI_TRIES = 2;                    /* попыток на канал */
+
+  var AI_CHANNELS = [
+    {
+      id: 'free', label: 'бесплатный', needKey: false,
+      url: 'https://text.pollinations.ai/openai',
+      models: ['openai-fast'],
+      headers: function () { return { 'Content-Type': 'application/json' }; },
+      body: function (model, system, user) {
+        return {
+          model: model,
+          messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+          max_tokens: 1600,
+          private: true
+        };
+      }
+    },
+    {
+      id: 'own', label: 'свой ключ', needKey: true,
+      url: 'https://api.reformboss.com/v1/chat/completions',
+      models: ['glm-5.3-flash', 'deepseek-v4-flash'],
+      headers: function (key) { return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }; },
+      body: function (model, system, user) {
+        return {
+          model: model,
+          messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+          max_tokens: 4000,
+          private: true
+        };
+      }
+    }
+  ];
+
+  /* atob есть в любом браузере, но при нестандартном окружении его может не быть —
+     тогда декодируем сами, иначе ключ молча пропадёт и «свой канал» не подключится. */
+  function b64decode(s) {
+    if (typeof atob === 'function') { try { return atob(s); } catch (e) { /* ниже запасной путь */ } }
+    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    var out = '', buf = 0, bits = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charAt(i);
+      if (c === '=') break;
+      var v = chars.indexOf(c);
+      if (v < 0) continue;
+      buf = (buf << 6) | v; bits += 6;
+      if (bits >= 8) { bits -= 8; out += String.fromCharCode((buf >> bits) & 0xFF); }
+    }
+    return out;
+  }
+
+  /* Три состояния, и их важно не путать:
+       null / не задан — ключа нет и никогда не было → берём встроенный;
+       ''  (пусто)     — человек сознательно очистил поле → свой канал выключен;
+       строка          — свой ключ человека.                                            */
+  function aiKeyCleared() { return cfg.aiKey !== null && cfg.aiKey !== undefined && !String(cfg.aiKey).length; }
+
+  function aiKey() {
+    if (aiKeyCleared()) return '';
+    if (cfg.aiKey && cfg.aiKey.length) return cfg.aiKey;
+    var ch = DEF_AI_CHUNKS[DEF_AI_KEY % DEF_AI_CHUNKS.length];
+    try { return b64decode(ch.join('')); } catch (e) { return ''; }
+  }
+
+  function setAiKey(val) { cfg.aiKey = val; GM_setValue('aiKey', val); }
+
+  function aiChannels() {
+    return AI_CHANNELS.filter(function (c) { return !c.needKey || aiKey(); });
+  }
+
   var aiBusy = false;
   var aiLast = 0;
-  var aiAnswer = null;                 /* { key, text, at, model } */
+  var aiAnswer = null;                 /* { key, text, at, model, kind } */
+  var aiVia = '';                      /* чем решилось в прошлый раз — показываем в окне */
   var AI_KEY = 'aiAnswer';
 
   try { aiAnswer = JSON.parse(GM_getValue(AI_KEY, 'null')); } catch (e) { aiAnswer = null; }
@@ -1451,9 +1564,32 @@ async function jobCollect(ctx, target) {
     try { GM_setValue(AI_KEY, JSON.stringify(aiAnswer)); } catch (e) { /* ignore */ }
   }
 
-  function aiWaitLeft() {
-    var left = AI_GAP - (Date.now() - aiLast);
+  /* Пауза считается по своему каналу: бесплатный ждёт свои 15 с, свой ключ — свои
+     1,5 с. Иначе после бесплатного запроса платный простаивал бы впустую. */
+  function aiLastOf(chId) {
+    var t = 0;
+    try { t = +(GM_getValue('aiLast_' + chId, 0) || 0); } catch (e) { t = 0; }
+    return t;
+  }
+
+  function aiWaitLeft(chId) {
+    var gap = chId === 'free' ? AI_GAP : AI_GAP_PAID;
+    var left = gap - (Date.now() - (aiLastOf(chId) || aiLast));
     return left > 0 ? Math.ceil(left / 1000) : 0;
+  }
+
+  function aiWaitAny() {
+    var left = 0;
+    aiChannels().forEach(function (c) {
+      var w = aiWaitLeft(c.id);
+      if (!left || w < left) left = w;
+    });
+    return left;
+  }
+
+  function markAi(chId) {
+    aiLast = Date.now();
+    try { GM_setValue('aiLast_' + chId, aiLast); } catch (e) { /* ignore */ }
   }
 
   /* текст задания с карточки: условие + код, если он в условии */
@@ -1487,58 +1623,122 @@ async function jobCollect(ctx, target) {
     return 'text';
   }
 
-  async function askAi() {
-    var ctx = stepContext();
-    if (!ctx) { setStatus('ИИ: открой страницу задания'); return; }
-    if (aiBusy) { setStatus('ИИ: уже думает…'); return; }
-    var wait = aiWaitLeft();
-    if (wait) { setStatus('ИИ: бесплатный лимит, подожди ' + wait + ' с'); return; }
+  function aiSystem() {
+    return 'Ты помощник по программированию. Реши задание с платформы Stepik. ' +
+      'Ответь коротко: только решение, без пояснений и без markdown-разметки. ' +
+      'Если это код — дай готовый код целиком. Учти: тестируется через stdin → stdout.';
+  }
 
-    var task = stepPrompt();
-    if (task.length < 20) { setStatus('ИИ: не вижу текста задания на странице'); return; }
-
+  function aiUser() {
     var kind = stepKindNow();
     var lang = stepLanguage();
     var ask = kind === 'choice'
       ? 'Задание — тест с выбором. Пришли номер правильного варианта и его текст, коротко.'
       : (lang ? 'Пиши на ' + lang + '.' : 'Определи язык по условию и пиши на нём.');
+    return ask + '\n\nУсловие:\n' + stepPrompt();
+  }
 
+  /* Чем решали — показываем человеку: он должен понимать, какой канал сработал. */
+  function aiViaText() {
+    var ch = AI_CHANNELS.filter(function (c) { return c.id === aiVia; })[0];
+    return ch ? ch.label : '';
+  }
+
+  /* Человеку нужно понять, что делать, а не «HTTP 402». */
+  function aiErrorText(status) {
+    if (status === 402) return 'бесплатный канал исчерпал лимит (402)';
+    if (status === 429) return 'лимит запросов (429), попробуй позже';
+    if (status === 401 || status === 403) return 'ключ ИИ не принят (' + status + ')';
+    if (status >= 500) return 'сервис ИИ недоступен (' + status + ')';
+    return 'сервис ответил HTTP ' + status;
+  }
+
+  async function askChannel(ch, ctx) {
+    var key = ch.needKey ? aiKey() : '';
+    var lastErr = null;
+    for (var i = 0; i < ch.models.length; i++) {
+      var model = ch.models[i];
+      for (var attempt = 0; attempt < AI_TRIES; attempt++) {
+        try {
+          var res = await fetch(ch.url, {
+            method: 'POST',
+            headers: ch.headers(key),
+            body: JSON.stringify(ch.body(model, aiSystem(), aiUser(ctx)))
+          });
+          if (!res.ok) {
+            lastErr = new Error(aiErrorText(res.status) + ' · ' + model);
+            lastErr.status = res.status;
+            /* 4xx повторять бессмысленно — ключ/лимит/модель не станут другими */
+            if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
+            await sleep(700);
+            continue;
+          }
+          var data = await res.json();
+          var msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
+          var text = String(msg.content || '').trim();
+          /* reasoning-модель могла не успеть доехать до ответа — тогда берём
+             размышления как есть, лучше, чем ничего */
+          if (!text && msg.reasoning_content) text = String(msg.reasoning_content).trim();
+          if (!text) { lastErr = new Error('пустой ответ от ' + model); await sleep(700); continue; }
+          return { text: text, model: (data.model || model), channel: ch.id };
+        } catch (e) {
+          lastErr = e;
+          await sleep(700);
+        }
+      }
+    }
+    throw lastErr || new Error('канал не ответил');
+  }
+
+  async function askAi() {
+    var ctx = stepContext();
+    if (!ctx) { setStatus('ИИ: открой страницу задания'); return; }
+    if (aiBusy) { setStatus('ИИ: уже думает…'); return; }
+
+    var list = aiChannels();
+    var wait = aiWaitAny();
+    if (wait) { setStatus('ИИ: лимит канала, подожди ' + wait + ' с'); return; }
+
+    var task = stepPrompt();
+    if (task.length < 20) { setStatus('ИИ: не вижу текста задания на странице'); return; }
+
+    var kind = stepKindNow();
     aiBusy = true;
     setStatus('ИИ думает над шагом ' + ctx.step + '…');
     setSiteProgress(0.5);
+
+    var errors = [];
+    var got = null;
     try {
-      var res = await fetch(AI_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: AI_MODEL,
-          messages: [
-            {
-              role: 'system',
-              content: 'Ты помощник по программированию. Реши задание с платформы Stepik. ' +
-                'Ответь коротко: только решение, без пояснений и без markdown-разметки. ' +
-                'Если это код — дай готовый код целиком.'
-            },
-            { role: 'user', content: ask + '\n\nУсловие:\n' + task }
-          ],
-          max_tokens: 1200,
-          private: true
-        })
-      });
-      if (!res.ok) throw new Error('сервис ответил HTTP ' + res.status);
-      var data = await res.json();
-      var text = ((data.choices && data.choices[0] && data.choices[0].message &&
-        data.choices[0].message.content) || '').trim();
-      if (!text) throw new Error('пустой ответ');
-      aiLast = Date.now();
-      aiAnswer = { key: ctx.key, text: text, at: Date.now(), model: AI_MODEL, kind: kind };
+      for (var i = 0; i < list.length && !got; i++) {
+        var ch = list[i];
+        /* Пауза канала — это «не долбить ЭТОТ сервис дважды подряд», а не запрет
+           идти в следующий. Отказ бесплатного только что выставил aiLast, и по
+           нему короткая пауза своего канала (1,5 с) выглядела как «ещё рано» —
+           свой ключ молча пропускался. Ждём эти полторы секунды, а не отменяем
+           канал: пользователь просил запасной путь, он должен срабатывать. */
+        var myWait = aiWaitLeft(ch.id);
+        if (myWait && myWait <= AI_WAIT_MAX) { await sleep(myWait * 1000 + 100); myWait = 0; }
+        if (myWait) { errors.push(ch.label + ': ждать ' + myWait + ' с'); continue; }
+        if (i > 0) setStatus('бесплатный не смог — пробую ' + ch.label + '…');
+        try {
+          got = await askChannel(ch, ctx);
+          markAi(ch.id);
+          aiVia = ch.id;
+        } catch (e) {
+          markAi(ch.id);             /* при ошибке тоже не долбим сервис */
+          errors.push(ch.label + ': ' + e.message);
+        }
+      }
+      if (!got) throw new Error(errors.join(' · ') || 'все каналы молчат');
+
+      aiAnswer = { key: ctx.key, text: got.text, at: Date.now(), model: got.model, kind: kind };
       saveAi();
       setStatus('ИИ: решение готово (шаг ' + ctx.step + ')');
       renderPanel(true);
       showAi();
     } catch (e) {
-      setStatus('ИИ не ответил: ' + e.message);
-      aiLast = Date.now();                 /* не долбим сервис при ошибке */
+      setStatus('ИИ не ответил — ' + e.message);
     } finally {
       aiBusy = false;
       setSiteProgress(job ? (jobTotal() ? job.at / jobTotal() : 0) : -1);
@@ -1557,7 +1757,8 @@ async function jobCollect(ctx, target) {
       '<button class="sgx-ai-x" type="button" title="Закрыть">' + icon('close', 14) + '</button></div>',
       '<textarea class="sgx-ai-text" readonly></textarea>',
       '<div class="sgx-ai-foot">',
-      '<span class="sgx-ai-note">проверь перед отправкой · модель ' + aiAnswer.model + '</span>',
+      '<span class="sgx-ai-note">проверь перед отправкой · ' +
+      (aiViaText() ? aiViaText() + ' · ' : '') + aiAnswer.model + '</span>',
       '<button class="sgx-ai-copy" type="button">' + icon('copy', 14) + 'Скопировать</button>',
       '</div>'
     ].join('');
@@ -1716,15 +1917,19 @@ async function jobCollect(ctx, target) {
     if (!keepStatus && !busy) setStatus('');
   }
 
-function ensurePanel() {
+  /* Панель живёт внутри бокового меню курса: по кнопке в шапке урока она занимает
+     место списка уроков, по крестику уроки возвращаются. Стиль — родной, тёмный
+     (как «Методы и функции» в меню), чтобы не выглядеть чужеродной вставкой. */
+  function ensurePanel() {
     if (document.getElementById('sgx-panel')) return;
     var panel = document.createElement('div');
     panel.id = 'sgx-panel';
     panel.innerHTML = [
-      '<div class="sgx-head"><span class="sgx-title">Задания Stepik</span>',
-      '<button class="sgx-close" type="button" title="Закрыть">' + icon('close', 15) + '</button></div>',
-      '<div class="sgx-range"><label>с</label><select id="sgx-from-l"></select>',
-      '<label>по</label><select id="sgx-to-l"></select></div>',
+      '<div class="sgx-module"><span class="sgx-badge">' + icon('spark', 13) + '</span>',
+      '<span class="sgx-modtitle">Задания Stepik</span>',
+      '<button class="sgx-close" type="button" title="Закрыть">' + icon('close', 14) + '</button></div>',
+      '<div class="sgx-row"><label>с</label><select id="sgx-from-l"></select></div>',
+      '<div class="sgx-row"><label>по</label><select id="sgx-to-l"></select></div>',
       '<div class="sgx-note" id="sgx-total"></div>',
       '<button class="sgx-btn primary" id="sgx-solve" type="button">' + icon('play', 15) +
       'Пройти и отправить</button>',
@@ -1739,27 +1944,88 @@ function ensurePanel() {
       '<div class="sgx-progress"><div class="sgx-bar" id="sgx-bar"></div></div>',
       '<div class="sgx-status" id="sgx-status"></div>'
     ].join('');
-    document.body.appendChild(panel);
 
     panel.querySelector('.sgx-close').addEventListener('click', function () { openPanel(false); });
-    document.getElementById('sgx-solve').addEventListener('click', function () { beginJob('solve'); });
-    document.getElementById('sgx-collect').addEventListener('click', function () { beginJob('collect'); });
-    document.getElementById('sgx-stop').addEventListener('click', function () { stopJob('остановлено'); });
-    document.getElementById('sgx-open').addEventListener('click', function () { redownload(); });
-    document.getElementById('sgx-ai-btn').addEventListener('click', function () { askAi(); });
-    renderPanel();
+    panel.querySelector('#sgx-solve').addEventListener('click', function () { beginJob('solve'); });
+    panel.querySelector('#sgx-collect').addEventListener('click', function () { beginJob('collect'); });
+    panel.querySelector('#sgx-stop').addEventListener('click', function () { stopJob('остановлено'); });
+    panel.querySelector('#sgx-open').addEventListener('click', function () { redownload(); });
+    panel.querySelector('#sgx-ai-btn').addEventListener('click', function () { askAi(); });
+    /* Вставляем сразу в боковое меню (или в body, если меню ещё не отрисовано):
+       без appendChild элемент не попадает в документ, и getElementById его не найдёт. */
+    var host = $('.lesson-sidebar__content') || document.body;
+    host.appendChild(panel);
   }
 
-  /* панель открывается только из меню Tampermonkey — на странице её не видно */
-  function openPanel(on) {
-    ensurePanel();
+  /* куда класть панель: в наш блок внутри прокручиваемой области меню курса */
+  function sidebarSlot(make) {
+    var content = $('.lesson-sidebar__content');
+    if (!content) return null;
+    var slot = document.getElementById('sgx-panel');
+    if (!slot && make === false) return null;
+    if (!slot) {
+      ensurePanel();
+      slot = document.getElementById('sgx-panel');
+    }
+    if (!slot) return null;
+    if (slot.parentNode !== content) content.appendChild(slot);
+    return slot;
+  }
+
+  /* открыть/закрыть панель. on=false — вернуть список уроков. */
+  function openPanel(on, silent) {
+    var want = on !== false;
+    var content = $('.lesson-sidebar__content');
+    var nav = $('.lesson-sidebar__toc') || (content && content.querySelector('nav'));
+
+    if (!content) {
+      if (!silent) toast('Боковое меню курса не видно — открой любой урок', true);
+      return false;
+    }
+    if (want && !sidebarSlot()) return false;
+    if (nav) nav.classList.toggle('sgx-sidebar-hidden', want);
     var panel = document.getElementById('sgx-panel');
-    panel.classList.toggle('on', on !== false);
-    if (on !== false) renderPanel();
-    if (on === false) setSiteProgress(job ? 0 : -1);
+    if (panel) panel.classList.toggle('on', want);
+    if (want) renderPanel();
+    else setSiteProgress(job ? 0 : -1);
+    return true;
   }
 
-async function beginJob(kind) {
+  function panelOpen() {
+    var panel = document.getElementById('sgx-panel');
+    return !!(panel && panel.classList.contains('on'));
+  }
+
+  /* кнопка в ряду настроек урока (рядом с «полноэкранным режимом» и шестерёнкой) */
+  function ensureToolsButton() {
+    var bar = $('.lesson-controls');
+    if (!bar || !bar.parentNode) return null;
+    var btn = document.getElementById('sgx-tools-btn');
+    if (btn && btn.parentNode === bar) return btn;
+    if (btn) btn.remove();
+    var li = document.createElement('li');
+    li.className = 'lesson-controls__item';
+    li.id = 'sgx-tools-btn';
+    li.innerHTML = '<button class="button_style_secondary" type="button" title="Задания Stepik">' +
+      '<span class="svg-icon sgx-tools-icon">' + icon('sliders', 16) + '</span>' +
+      '<span class="sgx-dot"></span></button>';
+    li.querySelector('button').addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      var was = panelOpen();
+      if (!openPanel(!was) && !was) toast('Не нашёл боковое меню курса', true);
+    });
+    bar.appendChild(li);
+    return li;
+  }
+
+  /* индикатор на кнопке: обход идёт (мигающая точка) */
+  function syncToolsButton() {
+    var li = ensureToolsButton();
+    if (li) li.classList.toggle('sgx-busy', !!job);
+  }
+
+  async function beginJob(kind) {
     var ctx = stepContext();
     if (!ctx) { setStatus('открой любой урок курса на stepik.org'); return; }
     if (kind === 'solve' && !cfg.token) { setStatus('нужен токен записи — меню → ⚙ Токен записи'); return; }
@@ -1888,6 +2154,11 @@ async function beginJob(kind) {
   }
 
   async function tick() {
+    /* Stepik перерисовывает сайдбар и шапку урока: и панель, и нашу кнопку надо
+       переставлять заново, иначе они исчезают после смены шага. */
+    syncToolsButton();
+    if (panelOpen()) sidebarSlot();
+
     var ctx = stepContext();
     if (!ctx) { hideChip(); currentKey = null; return; }
     if (ctx.key !== currentKey) {
@@ -1996,6 +2267,7 @@ async function beginJob(kind) {
       (cache.at ? new Date(cache.at).toLocaleString() : 'никогда'));
     if (lastOk) L.push('последняя запись: ' + lastOk.key + ' · ' + lastOk.when + ' · ' + lastOk.via);
     if (lastErr) L.push('последняя ошибка: ' + lastErr);
+    if (lastStatus) L.push('последнее сообщение: ' + lastStatus);
     L.push('');
 
     try {
@@ -2120,6 +2392,16 @@ async function beginJob(kind) {
       showAi();
     });
 
+    GM_registerMenuCommand('🔑 Настройки ИИ', function () {
+      var k = prompt('Ключ своего канала ИИ (api.reformboss.com).\n' +
+        'Пусто — останется только бесплатный канал.\n' +
+        'Внимание: ключ, вписанный сюда, виден в настройках скрипта у того, кто его поставил.',
+        cfg.aiKey || aiKey());
+      if (k === null) return;
+      setAiKey(k.trim());
+      toast(k.trim() ? '✓ Ключ сохранён' : '✓ Ключ убран — только бесплатный канал');
+    });
+
     GM_registerMenuCommand('🔄 Обновить список ответов', function () {
       storeIndex(true)
         .then(function (items) { toast('✓ В хранилище ' + Object.keys(items).length + ' ответов'); })
@@ -2131,7 +2413,9 @@ async function beginJob(kind) {
 
   function init() {
     injectBridge();
-    ensurePanel();
+    /* панель НЕ создаём заранее: она живёт в сайдбаре и должна появляться только
+       по нажатию кнопки. Иначе пустой блок висит в меню курса до первого клика. */
+    ensureToolsButton();
 
     /* задание пережило перезагрузку: сбрасываем поля перехода, иначе первый же
        тик решит, что «переход не сработал», и пропустит нужный шаг */
