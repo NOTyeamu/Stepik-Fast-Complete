@@ -18,6 +18,18 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwA
 
 const SCRIPT = fs.readFileSync(path.join(__dirname, '..', 'stepik-gist-sync.user.js'), 'utf8');
 
+/* Имена параметров песочницы, в которой исполняется скрипт. Один список на всех:
+   раньше он был продублирован, и добавление глобали легко забывалось в одном месте
+   (так пропал atob и «сломался» рабочий ключ ИИ). */
+const SANDBOX_ARGS = [
+  'window', 'document', 'location', 'fetch', 'console', 'navigator',
+  'GM_getValue', 'GM_setValue', 'GM_addStyle', 'GM_registerMenuCommand',
+  'CustomEvent', 'Event', 'KeyboardEvent', 'MouseEvent', 'PopStateEvent',
+  'HTMLTextAreaElement', 'HTMLInputElement', 'TextEncoder', 'btoa', 'atob',
+  'html2canvas', 'JSZip', 'URL',
+  'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'
+];
+
 const REPO = 'NOTyeamu/Stepik-Fast-Complete';
 const RAW = `https://raw.githubusercontent.com/${REPO}/main/answers/`;
 const INBOX_PUT = `https://api.github.com/repos/${REPO}/contents/inbox/`;
@@ -77,18 +89,6 @@ function makeFetch(state) {
     /* --- проверка токена в отчёте --- */
     if (u === `https://api.github.com/repos/${REPO}`) return state.storeDown ? fail(500) : ok({}, 'json');
 
-    /* --- ИИ, бесплатный канал (Pollinations): ключа нет по определению --- */
-    if (u.includes('text.pollinations.ai')) {
-      state.aiCalls.push({ url: u, body: init && init.body, auth: init && init.headers && init.headers.Authorization });
-      if (state.aiDown) return fail(402);            /* именно так он отвечает при перегрузе */
-      let asked = '';
-      try { asked = JSON.parse(init.body).messages.slice(-1)[0].content; } catch (e) { asked = ''; }
-      return ok({
-        choices: [{ message: { role: 'assistant', content: state.aiText || 'Console.WriteLine(5);' } }],
-        model: 'gpt-oss-20b', user_tier: 'anonymous', __asked: asked
-      }, 'json');
-    }
-
     /* --- ИИ, свой канал (ключевой) --- */
     if (u.includes('api.reformboss.com')) {
       state.aiPaidCalls.push({ url: u, body: init && init.body, auth: init && init.headers && init.headers.Authorization });
@@ -96,10 +96,16 @@ function makeFetch(state) {
       let asked = '';
       let model = '';
       try { const b = JSON.parse(init.body); asked = b.messages.slice(-1)[0].content; model = b.model; } catch (e) { /* ignore */ }
+      /* aiPaidQueue: разные ответы на 1-й, 2-й … запрос — так проверяется правка
+         после проваленной проверки (сначала плохой код, потом исправленный). */
+      const q = state.aiPaidQueue || [];
+      const nth = state.aiPaidCalls.length - 1;
+      const fromQueue = q.length ? q[Math.min(nth, q.length - 1)] : null;
+      const answerText = fromQueue != null ? fromQueue : (state.aiPaidText || 'static void PrintSquare(int x) { }');
       /* reasoning-модель отдаёт размышления отдельным полем — проверяем и это */
       const msg = state.aiPaidEmpty
         ? { role: 'assistant', content: '', reasoning_content: 'думал-думал' }
-        : { role: 'assistant', content: state.aiPaidText || 'static void PrintSquare(int x) { }' };
+        : { role: 'assistant', content: answerText };
       return ok({ choices: [{ message: msg }], model: model, __asked: asked }, 'json');
     }
 
@@ -124,7 +130,7 @@ function makeFetch(state) {
   };
 }
 
-function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiText, aiDown, aiPaidDown, aiPaidText, aiPaidEmpty, aiKey }) {
+function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiPaidDown, aiPaidText, aiPaidEmpty, aiKey, aiPaidQueue, checkHint, checkHintAt, cmMode }) {
   return new Promise((resolve, reject) => {
     const dom = new JSDOM(html, { url, runScripts: 'dangerously', pretendToBeVisual: true });
     const { window } = dom;
@@ -133,9 +139,9 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       store: Object.assign({}, store || {}), submissions: submissions || [],
       storeDown: !!storeDown, emptyLessonSteps: !!emptyLessonSteps,
       setValue: null, submitted: 0, retried: 0, docBlob: null, shots: 0,
-      aiCalls: [], aiText: aiText, aiDown: !!aiDown,
       aiPaidCalls: [], aiPaidDown: !!aiPaidDown, aiPaidText: aiPaidText,
-      aiPaidEmpty: !!aiPaidEmpty,
+      aiPaidEmpty: !!aiPaidEmpty, aiPaidQueue: aiPaidQueue || [],
+      cmMode: cmMode || '',
       storage: { writeToken: token === undefined ? 'github_pat_11TEST' : token }
     };
     if (job) state.storage.job = JSON.stringify(job);
@@ -167,7 +173,9 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       node.CodeMirror = {
         getValue: () => (state.setValue == null ? '' : state.setValue),
         setValue: (v) => { state.setValue = v; },
-        getOption: () => 'text/x-csharp',
+        /* язык приходит из редактора; по умолчанию C#, но сценарий может задать
+           свой — иначе «Python-ответ» проверялся бы на C#-расширении */
+        getOption: () => state.cmMode || 'text/x-csharp',
         refresh() {}, focus() {}
       };
     };
@@ -178,6 +186,20 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
 
     const cmNode = window.document.querySelector('.CodeMirror');
     if (cmNode) mkCm(cmNode);
+
+    /* отчёт проверки Stepik показывается не мгновенно после отправки — рисуем
+       его с задержкой, чтобы скрипт искал его так же, как на живом сайте */
+    if (checkHint) {
+      setTimeout(() => {
+        const host = window.document.querySelector('#sgx-test-hint') ||
+          window.document.querySelector('.attempt-wrapper__content') || window.document.body;
+        const d = window.document.createElement('div');
+        d.className = 'smart-hints ember-view submission-show__submission-hint';
+        d.innerHTML = '<p class="smart-hints__hint"></p>';
+        d.querySelector('.smart-hints__hint').textContent = checkHint;
+        host.appendChild(d);
+      }, checkHintAt == null ? 800 : checkHintAt);
+    }
 
     /* редактор, который Stepik дорисовывает с задержкой */
     if (lateEditor) {
@@ -191,12 +213,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
     }
 
     const fn = new Function(
-      'window', 'document', 'location', 'fetch', 'console', 'navigator',
-      'GM_getValue', 'GM_setValue', 'GM_addStyle', 'GM_registerMenuCommand',
-      'CustomEvent', 'Event', 'KeyboardEvent', 'MouseEvent', 'PopStateEvent',
-      'HTMLTextAreaElement', 'HTMLInputElement', 'TextEncoder', 'btoa', 'atob',
-      'html2canvas', 'JSZip', 'URL',
-      'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
+      SANDBOX_ARGS,
       SCRIPT
     );
 
@@ -224,6 +241,30 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       } catch (e) { reject(e); }
     }, waitMs);
   });
+}
+
+/* Лёгкая песочница без сценария: нужна, чтобы дотянуться до внутренних функций
+   скрипта (extOf и подобных) и проверить их напрямую, не поднимая весь прогон.
+   Скрипт целиком завёрнут в IIFE, поэтому «приклеить» хвост снаружи нельзя —
+   вставляем его внутрь, перед закрывающей `})();`. */
+function probeSandbox(html, expose, url) {
+  const dom = new JSDOM(html || HTML, { url: url || `https://stepik.org/lesson/${LESSON}/step/8`, runScripts: 'dangerously' });
+  const { window } = dom;
+  const names = expose || ['extOf'];
+  const tail = '\n  window.__probe = { ' + names.map((n) => n + ': ' + n).join(', ') + ' };\n';
+  const marked = SCRIPT.replace(/\}\)\(\);\s*$/, tail + '})();');
+  if (marked === SCRIPT) throw new Error('probeSandbox: не нашёл закрытие IIFE в скрипте');
+  const fn = new Function(SANDBOX_ARGS, marked);
+  fn(
+    window, window.document, window.location, () => Promise.reject(new Error('probe: no net')),
+    console, window.navigator, (k, d) => d, () => {}, () => {}, () => {},
+    window.CustomEvent, window.Event, window.KeyboardEvent, window.MouseEvent, window.PopStateEvent,
+    window.HTMLTextAreaElement, window.HTMLInputElement, TextEncoder, btoa, atob,
+    () => {}, {}, window.URL, setTimeout, clearTimeout, setInterval, clearInterval
+  );
+  const api = window.__probe || {};
+  api.close = () => { try { window.close(); } catch (e) { /* ignore */ } };
+  return api;
 }
 
 /* Реальная шапка урока (ряд настроек) и реальный сайдбар курса — взяты из
@@ -264,6 +305,32 @@ function statusText(win) {
   const el = win.document.querySelector('#sgx-status');
   if (el) return el.textContent;
   return win.document.documentElement.getAttribute('data-sgx-status') || '';
+}
+
+/* Открыть панель: кнопкой в шапке урока, а если шапки нет — через меню. */
+function openPanelIn(win, st) {
+  const btn = win.document.querySelector('#sgx-tools-btn button');
+  if (btn) { btn.click(); return; }
+  if (st && st.menu['📄 Пройти задания / собрать в Word']) {
+    st.menu['📄 Пройти задания / собрать в Word']();
+  }
+}
+
+/* Лента решения ИИ живёт внутри панели. Панель создаётся по клику, но «Спросить ИИ»
+   теперь создаёт её сам — поэтому лента уже должна быть на месте. Если её нет,
+   открываем панель кнопкой в шапке (или через меню, если шапки нет). */
+function aiFeedText(win, st) {
+  let log = win.document.querySelector('#sgx-ai-log');
+  if (!log) {
+    openPanelIn(win, st);
+    log = win.document.querySelector('#sgx-ai-log');
+  }
+  return log ? log.textContent : '';
+}
+
+function aiPanelShown(win) {
+  const p = win.document.querySelector('#sgx-ai-panel');
+  return !!(p && !p.hidden);
 }
 
 const HTML = `<!doctype html><html><body>
@@ -336,6 +403,7 @@ const CHOICE_HTML = `<!doctype html><html><body>
 
 /* страница задания, где ответа в папке нет — сюда придёт ИИ */
 const AI_HTML = `<!doctype html><html><body>
+  ${SHELL_HTML}
   <div class="attempt-wrapper"><div class="attempt-wrapper__content">
     <div class="step-text">Напишите на C# программу, которая считает сумму 2 и 3</div>
     <div class="CodeMirror"><textarea></textarea></div>
@@ -344,8 +412,11 @@ const AI_HTML = `<!doctype html><html><body>
 </body></html>`;
 
 /* Ровно та вёрстка, на которой человек получил «условие отсутствует»: условие лежит
-   в .html-content.rich-text-viewer, тесты — в таблице «Тестовые данные». */
+   в .html-content.rich-text-viewer, тесты — в таблице «Тестовые данные».
+   Шапку урока и сайдбар добавляем: без них не создаётся ни кнопка, ни панель,
+   а решение ИИ показывается именно в панели. */
 const AI_REAL_HTML = `<!doctype html><html><body>
+  ${SHELL_HTML}
   <div class="attempt-wrapper"><div class="attempt-wrapper__content">
     <div class="step-inner page-fragment">
       <div class="html-content rich-text-viewer">
@@ -380,7 +451,73 @@ const AI_NO_TASK_HTML = `<!doctype html><html><body>
   </div></div>
 </body></html>`;
 
+/* Ровно тот отчёт, который Stepik показывает после проваленной отправки:
+   в нём и номер теста, и вход, и правильный вывод, и трейсбек. По нему модель
+   должна понять ошибку и переписать решение — ради этого всё и делалось. */
+const AI_FAIL_HINT =
+  'Failed test #1 of 3. Runtime error\n' +
+  'Test input: Анна\n20\n' +
+  'Correct output: Анна, вам 20 лет\n' +
+  'Your code output:\nError:\nTraceback (most recent call last):\n' +
+  "  File \"main.py\", line 2, in <module>\n" +
+  "    age = int(input())\n" +
+  "ValueError: invalid literal for int() with base 10: 'Анна'";
+
+/* Задача про возраст + место под отчёт проверки (появляется по ходу теста). */
+const AI_FIX_HTML = `<!doctype html><html><body>
+  ${SHELL_HTML}
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="step-inner page-fragment">
+      <div class="html-content rich-text-viewer">
+        <span><p>Спросите у пользователя имя и возраст, затем выведите «Имя, вам N лет».</p></span>
+      </div>
+    </div>
+    <div class="CodeMirror"><textarea></textarea></div>
+    <button class="submit" type="button">Отправить на проверку</button>
+    <div id="sgx-test-hint"></div>
+  </div></div>
+</body></html>`;
+
+/* Тест с выбором варианта: ИИ отвечает текстом, а скрипт должен сопоставить
+   ответ с реальными вариантами и положить в хранилище именно их. */
+const AI_CHOICE_HTML = `<!doctype html><html><body>
+  ${SHELL_HTML}
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="step-inner page-fragment">
+      <div class="html-content rich-text-viewer">
+        <span><p>Выберите метод, который выводит куб переданного числа на консоль.</p></span>
+      </div>
+    </div>
+    <div class="quiz-component" data-type="choice-quiz">
+      <div class="quiz-plugin__content">
+        <label><input type="radio" name="q" value="11"> PrintSquare</label>
+        <label><input type="radio" name="q" value="12"> PrintCube</label>
+      </div>
+    </div>
+  </div></div>
+</body></html>`;
+
 (async () => {
+  /* Решение ИИ сохранялось в файл с именем «…textxc»: язык из CodeMirror приходит
+     MIME-строкой («text/x-csharp»), а extOf просто вычищал из неё знаки. Проверяем
+     на настоящем входе — до того, как это снова сломает имя файла в хранилище. */
+  console.log('\n=== 0. расширение файла по языку из CodeMirror ===');
+  {
+    const probe = probeSandbox(HTML, ['extOf']);
+    const cases = [
+      ['text/x-csharp', 'cs'], ['text/x-python', 'py'], ['text/x-c++src', 'cpp'],
+      ['text/x-java', 'java'], ['csharp', 'cs'], ['python3', 'py'], ['c++', 'cpp'],
+      ['Python', 'py'], ['', 'txt'], [null, 'txt']
+    ];
+    cases.forEach(([lang, want]) => {
+      const got = probe.extOf(lang);
+      check('«' + lang + '» → .' + want, got === want, 'получилось .' + got);
+    });
+    check('MIME не превращается в «textxc»', probe.extOf('text/x-csharp') !== 'textxc',
+      probe.extOf('text/x-csharp'));
+    probe.close();
+  }
+
   console.log('\n=== 1. автосохранение зачтённого шага ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
@@ -940,50 +1077,49 @@ const AI_NO_TASK_HTML = `<!doctype html><html><body>
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
     store: {}, submissions: [], html: AI_HTML, waitMs: 3000,
-    aiText: 'using System;\nclass P { static void Main() { Console.WriteLine(5); } }',
+    aiPaidText: 'using System;\nclass P { static void Main() { Console.WriteLine(5); } }',
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
       await new Promise((r) => setTimeout(r, 1500));
 
-      check('запрос к бесплатному ИИ ушёл', st.aiCalls.length === 1, 'запросов: ' + st.aiCalls.length);
-      const body = st.aiCalls[0] && JSON.parse(st.aiCalls[0].body);
-      check('модель указана явно', body && body.model === 'openai-fast', body && body.model);
-      check('в запросе нет никакого ключа',
-        !/github_pat|Bearer|api[_-]?key/i.test(st.aiCalls[0].body), 'тело запроса чистое');
-      const asked = st.aiCalls[0] && JSON.parse(st.aiCalls[0].body).messages.slice(-1)[0].content;
+      check('запрос к ИИ ушёл', st.aiPaidCalls.length === 1,
+        'запросов: ' + st.aiPaidCalls.length);
+      const body = st.aiPaidCalls[0] && JSON.parse(st.aiPaidCalls[0].body);
+      check('модель указана явно', body && body.model === 'glm-5.3-flash', body && body.model);
+      check('токен ушёл заголовком, а не в теле',
+        /^Bearer .+/.test((st.aiPaidCalls[0] || {}).auth || '') &&
+        !/github_pat|Bearer|api[_-]?key/i.test(st.aiPaidCalls[0].body), 'тело чистое');
+      const asked = st.aiPaidCalls[0] && JSON.parse(st.aiPaidCalls[0].body).messages.slice(-1)[0].content;
       check('в запрос попал текст задания', /сумму 2 и 3/.test(asked), asked && asked.slice(0, 80));
 
-      const box = win.document.querySelector('#sgx-ai');
-      check('окно с решением открылось', !!box);
-      const text = box && box.querySelector('.sgx-ai-text').value;
-      check('в окне именно ответ ИИ', /Console\.WriteLine\(5\)/.test(text || ''), text);
-      check('в окне нет другого ответа/склейки',
-        (text || '').trim() === 'using System;\nclass P { static void Main() { Console.WriteLine(5); } }', text);
+      check('старое окно #sgx-ai больше не показывается',
+        !win.document.querySelector('#sgx-ai'));
 
       check('ничего не вставлено в редактор', st.setValue === null, JSON.stringify(st.setValue));
       check('ничего не отправлено', st.submitted === 0, 'кликов: ' + st.submitted);
-      check('в очереди ответов пусто', Object.keys(st.inbox).length === 0);
+      /* Решение намеренно уезжает в общее хранилище: иначе кнопка «вставить»
+         ищет его в answers/ и отвечает «в хранилище нет ответа». */
+      check('решение опубликовано в очередь', Object.keys(st.inbox).length === 1,
+        'файлов: ' + Object.keys(st.inbox).length);
     }
   });
 
   console.log('\n=== 25. ИИ недоступен → сказано внятно, ничего не сломано ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    /* «недоступен» — это когда молчат ОБА канала: с одним бесплатным, который упал,
-       скрипт обязан уйти в свой ключ, и это не ошибка, а работа (сценарий 28) */
     store: {}, submissions: [], html: AI_HTML, waitMs: 10000,
-    aiDown: true, aiPaidDown: true,
+    aiPaidDown: true,
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
-      await new Promise((r) => setTimeout(r, 9000));
+      await new Promise((r) => setTimeout(r, 5000));
       const status = statusText(win);
       check('сказано, что ИИ не ответил', /ИИ не ответил/.test(status), status);
-      check('окно с решением не открылось', !win.document.querySelector('#sgx-ai'));
+      check('старое окно с решением не открылось', !win.document.querySelector('#sgx-ai'));
       check('редактор не тронут', st.setValue === null);
     }
   });
 
-  console.log('\n=== 26. лимит бесплатного ИИ соблюдается (1 запрос / 15 с) ===');
+  console.log('\n=== 26. пауза между запросами к ИИ соблюдается ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
     store: {}, submissions: [], html: AI_HTML, waitMs: 3000,
@@ -992,8 +1128,8 @@ const AI_NO_TASK_HTML = `<!doctype html><html><body>
       await new Promise((r) => setTimeout(r, 1200));
       st.menu['✨ ИИ: решить текущий шаг']();      /* сразу второй раз */
       await new Promise((r) => setTimeout(r, 600));
-      check('второй запрос не ушёл — сработал лимит', st.aiCalls.length === 1,
-        'запросов: ' + st.aiCalls.length);
+      check('второй запрос не ушёл — сработала пауза', st.aiPaidCalls.length === 1,
+        'запросов: ' + st.aiPaidCalls.length);
       const status = statusText(win);
       check('сказано, сколько подождать', /подожди \d+ с|лимит/.test(status), status);
     }
@@ -1010,24 +1146,20 @@ const AI_NO_TASK_HTML = `<!doctype html><html><body>
         chip && chip.querySelector('.sgx-label').textContent === 'есть решение');
       check('кнопка ИИ в скобе спрятана (ответ уже есть)',
         chip && !chip.classList.contains('sgx-no-answer'), chip && chip.className);
-      check('к ИИ не обращались', st.aiCalls.length === 0);
+      check('к ИИ не обращались', st.aiPaidCalls.length === 0);
     }
   });
 
-  console.log('\n=== 28. HTTP 402 у бесплатного → переход на свой канал ===');
+  console.log('\n=== 28. своя модель отвечает → решение готово ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    store: {}, submissions: [], html: AI_HTML, waitMs: 12000,
-    aiDown: true,                                   /* ровно та ошибка, что видит человек */
+    store: {}, submissions: [], html: AI_HTML, waitMs: 6000,
     aiPaidText: 'static void PrintSquare(int x)\n{\n    Console.WriteLine(x * x * x);\n}',
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
-      /* бесплатный пробуется дважды на модель × две модели, между попытками 0,7 с —
-         ждём с запасом, иначе проверка ловит процесс на середине */
-      await new Promise((r) => setTimeout(r, 8000));
+      await new Promise((r) => setTimeout(r, 2500));
 
-      check('бесплатный канал попробован', st.aiCalls.length >= 1, 'попыток: ' + st.aiCalls.length);
-      check('после отказа пошли в свой канал', st.aiPaidCalls.length >= 1,
+      check('запрос ушёл в свой канал', st.aiPaidCalls.length >= 1,
         'попыток: ' + st.aiPaidCalls.length);
       const paid = st.aiPaidCalls[0];
       check('в свой канал ушёл ключ в заголовке',
@@ -1037,46 +1169,39 @@ const AI_NO_TASK_HTML = `<!doctype html><html><body>
       check('модель — быстрая, не reasoning',
         JSON.parse(paid.body).model === 'glm-5.3-flash', JSON.parse(paid.body).model);
 
-      const box = win.document.querySelector('#sgx-ai');
-      check('окно с решением открылось', !!box);
-      check('в окне ответ своего канала',
-        /PrintSquare/.test((box && box.querySelector('.sgx-ai-text').value) || ''),
-        box && box.querySelector('.sgx-ai-text').value);
-      check('подписано, каким каналом решено',
-        /свой ключ/.test(box.querySelector('.sgx-ai-note').textContent),
-        box.querySelector('.sgx-ai-note').textContent);
+      const feed = aiFeedText(win, st);
+      check('решение показано в ленте панели', /PrintSquare/.test(feed), feed.slice(0, 60));
+      check('блок ИИ виден в панели', aiPanelShown(win));
+      check('старое окно не открылось', !win.document.querySelector('#sgx-ai'));
       check('ничего не вставлено и не отправлено', st.setValue === null && st.submitted === 0);
     }
   });
 
-  console.log('\n=== 29. оба канала молчат → понятное объяснение, а не «HTTP 500» ===');
+  console.log('\n=== 29. ИИ молчит → понятное объяснение, а не «HTTP 500» ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    store: {}, submissions: [], html: AI_HTML, waitMs: 12000,
-    aiDown: true, aiPaidDown: true,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 8000,
+    aiPaidDown: true,
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
-      await new Promise((r) => setTimeout(r, 9000));
+      await new Promise((r) => setTimeout(r, 5000));
       const status = statusText(win);
-      check('сказано, что бесплатный исчерпал лимит', /402/.test(status), status);
-      check('сказано про свой канал', /свой ключ/.test(status), status);
-      check('окно не открылось', !win.document.querySelector('#sgx-ai'));
+      check('сказано, что сервис недоступен', /недоступен|HTTP 500|500/.test(status), status);
+      check('старое окно не открылось', !win.document.querySelector('#sgx-ai'));
       check('редактор не тронут', st.setValue === null);
     }
   });
 
-  console.log('\n=== 30. ключ можно убрать: остаётся только бесплатный канал ===');
+  console.log('\n=== 30. ключ убран → ИИ выключен, в сеть не ходим ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
     store: {}, submissions: [], html: AI_HTML, waitMs: 5000,
-    /* '' — это «человек сам очистил поле», и оно должно значить «своего канала нет».
-       Раньше пустая строка молча возвращала встроенный ключ, и убрать его было нельзя. */
-    aiKey: '', aiDown: true, aiPaidText: 'не должно быть использовано',
+    /* '' — это «человек сам очистил поле», и оно значит «канала нет».
+       Раньше пустая строка молча возвращала встроенный ключ. */
+    aiKey: '', aiPaidText: 'не должно быть использовано',
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
-      /* ждём столько же, сколько и в сценарии 28: проверка «не пошли» имеет смысл
-         только если бы было время сходить */
-      await new Promise((r) => setTimeout(r, 8000));
+      await new Promise((r) => setTimeout(r, 2500));
       check('в свой канал не пошли — ключа нет', st.aiPaidCalls.length === 0,
         'попыток: ' + st.aiPaidCalls.length);
       check('про свой ключ даже не упомянуто',
@@ -1090,31 +1215,28 @@ const AI_NO_TASK_HTML = `<!doctype html><html><body>
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
     store: {}, submissions: [], html: AI_HTML, waitMs: 12000,
     /* aiKey не передаём: значит в памяти его нет и должен сработать встроенный */
-    aiDown: true, aiPaidText: 'static void FromBuiltIn() { }',
+    aiPaidText: 'static void FromBuiltIn() { }',
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
-      await new Promise((r) => setTimeout(r, 8000));
-      check('со встроенным ключом свой канал работает', st.aiPaidCalls.length >= 1,
+      await new Promise((r) => setTimeout(r, 2500));
+      check('со встроенным ключом канал работает', st.aiPaidCalls.length >= 1,
         'попыток: ' + st.aiPaidCalls.length);
-      const box = win.document.querySelector('#sgx-ai');
-      check('и решение показано', !!box && /FromBuiltIn/.test(box.querySelector('.sgx-ai-text').value),
-        box ? box.querySelector('.sgx-ai-text').value : 'окна нет');
+      const feed = aiFeedText(win, st);
+      check('и решение показано в ленте', /FromBuiltIn/.test(feed), feed.slice(0, 60));
     }
   });
 
   console.log('\n=== 31. reasoning-модель без content → берём размышления, а не пусто ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    store: {}, submissions: [], html: AI_HTML, waitMs: 12000,
-    aiDown: true, aiPaidEmpty: true,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 8000,
+    aiPaidEmpty: true,
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
-      await new Promise((r) => setTimeout(r, 9000));
-      const box = win.document.querySelector('#sgx-ai');
+      await new Promise((r) => setTimeout(r, 5000));
       check('пустой ответ не остался незамеченным', st.aiPaidCalls.length >= 1);
-      check('окно открылось с тем, что модель всё-таки отдала',
-        !!box && /думал-думал/.test(box.querySelector('.sgx-ai-text').value),
-        box ? box.querySelector('.sgx-ai-text').value : 'окна нет');
+      const feed = aiFeedText(win, st);
+      check('размышления показаны вместо пустоты', /думал-думал/.test(feed), feed.slice(0, 80));
       check('в редактор по-прежнему ничего не попало', st.setValue === null);
     }
   });
@@ -1127,8 +1249,9 @@ const AI_NO_TASK_HTML = `<!doctype html><html><body>
       st.menu['✨ ИИ: решить текущий шаг']();
       await new Promise((r) => setTimeout(r, 2000));
 
-      check('запрос к ИИ ушёл', st.aiCalls.length === 1, 'запросов: ' + st.aiCalls.length);
-      const body = (st.aiCalls[0] && st.aiCalls[0].body) || '';
+      check('запрос к ИИ ушёл', st.aiPaidCalls.length === 1,
+        'запросов: ' + st.aiPaidCalls.length);
+      const body = (st.aiPaidCalls[0] && st.aiPaidCalls[0].body) || '';
       /* раньше в запрос уезжала пустая заготовка — здесь проверяем сам текст */
       check('в запросе есть условие задания', /PrintSquare/.test(body), 'условие найдено');
       check('в запросе есть тестовые данные', /вход: 5/.test(body), 'тесты найдены');
@@ -1148,9 +1271,160 @@ const AI_NO_TASK_HTML = `<!doctype html><html><body>
       await new Promise((r) => setTimeout(r, 1500));
       const status = statusText(win);
       check('сказано, что условия не видно', /не вижу условия/.test(status), status);
-      check('к ИИ НЕ обращались — незачем', st.aiCalls.length === 0,
-        'запросов: ' + st.aiCalls.length);
-      check('окно решения не открылось', !win.document.querySelector('#sgx-ai'));
+      check('к ИИ НЕ обращались — незачем', st.aiPaidCalls.length === 0,
+        'запросов: ' + st.aiPaidCalls.length);
+      check('старое окно решения не открылось', !win.document.querySelector('#sgx-ai'));
+    }
+  });
+
+  console.log('\n=== 34. решение ИИ уезжает в хранилище и его можно вставить ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_REAL_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'def main():\n    print("куб")\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3500));
+
+      check('решение ИИ опубликовано в очередь', st.inboxMessages.some((m) => /inbox:/.test(m)),
+        st.inboxMessages.join(' | ') || 'ничего не ушло');
+      const name = Object.keys(st.inbox)[0] || '';
+      check('в хранилище лежит .py с решением ИИ', /\.py$/.test(name) && /куб/.test(st.inbox[name] || ''),
+        name + ' → ' + String(st.inbox[name] || '').slice(0, 30));
+
+      /* главное: после этого кнопка «вставить» больше не должна говорить «нет ответа» */
+      openPanelIn(win, st);
+      await new Promise((r) => setTimeout(r, 400));
+      check('панель знает про шаг', !!win.document.querySelector('#sgx-panel.on'));
+      check('лента показывает решение', /куб/.test(aiFeedText(win, st)));
+      check('в статусе нет «нет ответа»',
+        !/нет ответа/.test(statusText(win)), statusText(win));
+    }
+  });
+
+  console.log('\n=== 35. без ключа ИИ честно выключен ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_REAL_HTML, waitMs: 5000,
+    aiKey: '',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 1500));
+      const status = statusText(win);
+      check('сказано, что нет ключа', /нет ключа/.test(status), status);
+      check('в сеть не ходили вообще', st.aiPaidCalls.length === 0,
+        'вызовов: ' + st.aiPaidCalls.length);
+    }
+  });
+
+  console.log('\n=== 36. ИИ читает ошибку теста и правит решение сам ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_FIX_HTML, waitMs: 16000, cmMode: 'text/x-python',
+    /* 1-й ответ — плохой (падает на кириллице), 2-й — исправленный */
+    aiPaidQueue: [
+      'name = input()\nage = int(input())\nprint(f"{name}, вам {age} лет")\n',
+      'name = input()\ntry:\n    age = int(input())\nexcept ValueError:\n    age = 0\nprint(f"{name}, вам {age} лет")\n'
+    ],
+    checkHint: AI_FAIL_HINT,
+    checkHintAt: 600,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+      check('первый ответ получен', st.aiPaidCalls.length >= 1,
+        'запросов: ' + st.aiPaidCalls.length);
+
+      /* отправляем — сайт отвечает отчётом об ошибке, скрипт должен пойти на правку */
+      const btn = win.document.querySelector('button.submit');
+      if (btn) btn.click();
+      await new Promise((r) => setTimeout(r, 11000));
+
+      check('сделан второй запрос — на исправление', st.aiPaidCalls.length >= 2,
+        'запросов: ' + st.aiPaidCalls.length);
+      const second = st.aiPaidCalls[1] && JSON.parse(st.aiPaidCalls[1].body);
+      const asked = second ? second.messages.slice(-1)[0].content : '';
+      check('в запрос на правку попал отчёт проверки',
+        /Failed test #1 of 3/.test(asked) && /ValueError/.test(asked),
+        asked.slice(-260));
+      check('в запрос попал и прошлый код ИИ', /вам \{age\} лет/.test(asked),
+        asked.slice(-200));
+      check('сказано, что решение исправлено', /исправлен/.test(statusText(win)),
+        statusText(win));
+    }
+  });
+
+  console.log('\n=== 37. ошибку видит и кнопка «Отправить на проверку» сайта ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_FIX_HTML, waitMs: 16000,
+    aiPaidQueue: [
+      'name = input()\nage = int(input())\nprint(f"{name}, вам {age} лет")\n',
+      'name = input()\nprint(name, "вам", input(), "лет")\n'
+    ],
+    checkHint: AI_FAIL_HINT,
+    checkHintAt: 600,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+
+      /* кликаем именно кнопку сайта — раньше такой путь вообще не приводил к правке */
+      const site = win.document.querySelector('button.submit');
+      site.click();
+      await new Promise((r) => setTimeout(r, 11000));
+      check('правка запущена кликом по кнопке сайта', st.aiPaidCalls.length >= 2,
+        'запросов: ' + st.aiPaidCalls.length);
+    }
+  });
+
+  console.log('\n=== 37a. две ловушки одной отправки не делают две правки ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_FIX_HTML, waitMs: 16000, cmMode: 'text/x-python',
+    aiPaidQueue: [
+      'name = input()\nage = int(input())\nprint(name, age)\n',
+      'name = input()\nage = int(input())\nprint(f"{name}, вам {age} лет")\n'
+    ],
+    checkHint: AI_FAIL_HINT,
+    checkHintAt: 300,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+      const before = st.aiPaidCalls.length;
+
+      /* и клик сайта, и перехват сети срабатывают на одну отправку: правка
+         должна быть ровно одна, иначе лимит сгорит вдвое быстрее */
+      const site = win.document.querySelector('button.submit');
+      site.click();
+      site.click();
+      win.document.dispatchEvent(new win.CustomEvent('sgx:net', {
+        detail: {
+          method: 'POST', url: '/api/submissions',
+          body: JSON.stringify({ submissions: [{ step: 108, status: 'wrong', reply: { code: 'x', language: 'python3' } }] })
+        }
+      }));
+      await new Promise((r) => setTimeout(r, 11000));
+
+      check('сделана ровно одна правка, а не две', st.aiPaidCalls.length === before + 1,
+        'запросов после отправки: ' + (st.aiPaidCalls.length - before));
+    }
+  });
+
+  console.log('\n=== 38. решение ИИ для теста с выбором ложится в хранилище вариантами ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/9?unit=1818966`,
+    store: {}, submissions: [], html: AI_CHOICE_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'Правильный вариант: 1) PrintSquare',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3500));
+      const name = Object.keys(st.inbox)[0] || '';
+      check('для теста с выбором создан .json', /\.json$/.test(name), name);
+      let data = {};
+      try { data = JSON.parse(st.inbox[name] || '{}'); } catch (e) { /* ignore */ }
+      check('в ответе выбран именно PrintSquare', /PrintSquare/.test(JSON.stringify(data)),
+        st.inbox[name]);
+      check('выбран правильный id варианта', String(data.ids || '').indexOf('11') >= 0,
+        'ids: ' + JSON.stringify(data.ids));
     }
   });
 

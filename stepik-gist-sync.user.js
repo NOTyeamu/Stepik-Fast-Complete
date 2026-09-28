@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.1.1
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ — по бесплатному каналу, а при его отказе по своему.
+// @version      6.2.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ, а если тесты не прошли — прочитает ошибку и попробует исправить сам.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
 // @connect      raw.githubusercontent.com
 // @connect      api.github.com
-// @connect      text.pollinations.ai
 // @connect      api.reformboss.com
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -53,7 +52,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.1.1';
+  var VERSION = '6.2.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -64,12 +63,12 @@
      в открытых репозиториях, — ищет непрерывную строку. */
   var DEF_TOKEN = 'github_pat_1' + '1A3MLZTQ090Ak9zudxqsU_bXlwU6roNAIiWb9zM03AZafZjVxnRM5HCWchgvgf1AKSFEY' + 'VU5DY7J16pY2';
 
-  /* Ключ платного канала ИИ. Собран из кусков и закодирован: в исходнике не лежит
+  /* Ключ канала ИИ. Собран из кусков и закодирован: в исходнике не лежит
      цельной строкой, в окне «исходный код» не бросается в глаза. Это НЕ защита —
      любой, кто поставил скрипт, технически может этим ключом воспользоваться
      (подробности в README, раздел «Решение от ИИ»). Полностью снять вопрос можно
-     так: очистить поле в меню → «🔑 Настройки ИИ» — останется только бесплатный
-     канал. Две копии, чтобы откат не оставил без ИИ вовсе. */
+     так: очистить поле в меню → «🔑 Настройки ИИ» — тогда ИИ выключается совсем.
+     Две копии, чтобы откат не оставил без ИИ вовсе. */
   var DEF_AI_CHUNKS = [
     ['c2stOWE0', 'ZWFmMmFi', 'YjY3MzVl', 'OWI1ZDY3', 'ZGVjM2Vk', 'Zjk5OWMw', 'YTExZjY2', 'MDQxZGZi', 'NjM1'],
     ['c2stNGVi', 'ZTc4ZmM3', 'M2FiZDU1', 'YzdjZmNi', 'NzQ2ZTkz', 'YTNmNGFi', 'Njc4ZDg5', 'ZDQ5N2Fh', 'YmU5MQ']
@@ -342,9 +341,30 @@
     bash: 'sh', shell: 'sh', text: 'txt', plaintext: 'txt'
   };
 
+  /* Язык приходит в двух видах: коротким именем («python3», «csharp») и MIME-строкой
+     из CodeMirror («text/x-python», «text/x-csharp», «text/x-c++src»). Раньше MIME
+     просто чистился от знаков — и ответ ложился в файл с расширением «textxc».
+     Поэтому сначала берём последний осмысленный кусок, потом уже ищем в таблице. */
   function extOf(lang) {
     var m = String(lang || '').toLowerCase().trim();
-    return EXT[m] || (m ? (m.replace(/[^a-z0-9]/g, '').slice(0, 6) || 'txt') : 'txt');
+    if (!m) return 'txt';
+    if (EXT[m]) return EXT[m];
+
+    /* text/x-python → python · text/x-c++src → c++ · application/x-java → java */
+    var tail = m.replace(/^[a-z]+\/[a-z0-9.+-]*-/, '').replace(/(src|script)$/, '');
+    if (EXT[tail]) return EXT[tail];
+    /* x-csharp → csharp · c++src → c++ */
+    var bare = tail.replace(/^x-/, '');
+    if (EXT[bare]) return EXT[bare];
+    /* добавочные слова: «python 3», «python3.6» → python3 / python */
+    var word = (m.match(/[a-z0-9+#]+/g) || []).filter(function (w) {
+      return w !== 'text' && w !== 'application' && w !== 'x' && w !== 'src' && !/^\d+$/.test(w);
+    });
+    for (var i = 0; i < word.length; i++) {
+      if (EXT[word[i]]) return EXT[word[i]];
+    }
+    /* совсем незнакомое — вернём осмысленный огрызок, но не «textxc» */
+    return (bare.replace(/[^a-z0-9]/g, '').slice(0, 6) || 'txt');
   }
 
   function fromReply(reply, via) {
@@ -562,6 +582,15 @@
     return { ok: false, error: 'редактор для вставки не найден' };
   }
 
+  async function readCodeFromEditor() {
+    var r = await bridgeAsk({});
+    if (r && r.ok && r.value != null) return String(r.value);
+    var c6 = $('.cm-content');
+    if (c6) return c6.textContent || '';
+    var field = $('.attempt-wrapper__plugin textarea, .quiz-component textarea');
+    return field ? (field.value || '') : '';
+  }
+
   function writeChoice(data) {
     var wantIds = (data.ids || []).map(String);
     var wantTxt = (data.answers || []).map(norm);
@@ -760,26 +789,42 @@
     '#sgx-panel .sgx-progress{height:3px;background:rgba(255,255,255,.12);margin:2px 0 0}',
     '#sgx-panel .sgx-bar{height:100%;width:0;background:#4CAF50;transition:width .35s ease}',
     '#sgx-panel .sgx-status{padding:10px 16px 14px;font-size:12.5px;color:rgba(255,255,255,.72);min-height:34px;line-height:1.45}',
-    /* окно с решением ИИ */
-    '#sgx-ai{position:fixed;right:20px;bottom:20px;z-index:2147483200;width:420px;',
-    'max-width:calc(100vw - 32px);max-height:70vh;display:flex;flex-direction:column;overflow:hidden;',
-    'border-radius:14px;background:#FFFFFF;border:1px solid rgba(15,23,42,.08);',
-    'box-shadow:0 16px 40px rgba(15,23,42,.22),0 2px 8px rgba(15,23,42,.06);',
-    'font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#0F172A}',
-    '#sgx-ai *{box-sizing:border-box}',
-    '#sgx-ai .sgx-ai-head{display:flex;align-items:center;justify-content:space-between;',
-    'padding:12px 14px;border-bottom:1px solid #F1F5F9;font-size:14px;font-weight:700}',
-    '#sgx-ai .sgx-ai-x{display:flex;align-items:center;justify-content:center;width:26px;height:26px;',
-    'border:0;border-radius:8px;background:#F1F5F9;color:#64748B;cursor:pointer;padding:0}',
-    '#sgx-ai .sgx-ai-x:hover{background:#E2E8F0;color:#0F172A}',
-    '#sgx-ai .sgx-ai-text{flex:1 1 auto;min-height:180px;margin:0;padding:12px 14px;border:0;resize:vertical;',
-    'background:#F8FAFC;color:#0F172A;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}',
-    '#sgx-ai .sgx-ai-text:focus{outline:none;background:#F1F5F9}',
-    '#sgx-ai .sgx-ai-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px}',
-    '#sgx-ai .sgx-ai-note{font-size:11.5px;color:#94A3B8}',
-    '#sgx-ai .sgx-ai-copy{display:flex;align-items:center;gap:7px;height:34px;padding:0 13px;border:0;',
-    'border-radius:9px;background:#2563EB;color:#fff;font-size:13px;font-weight:700;cursor:pointer}',
-    '#sgx-ai .sgx-ai-copy:hover{filter:brightness(1.07)}',
+    /* --- блок ИИ внутри панели: повторяет родной редактор кода Stepik --- */
+    '#sgx-panel .sgx-ai[hidden]{display:none}',
+    '#sgx-ai-panel{margin:2px 0 0;border-top:1px solid rgba(255,255,255,.10)}',
+    '#sgx-ai-panel .sgx-ai-head{display:flex;align-items:center;justify-content:space-between;',
+    'gap:8px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,.10)}',
+    '#sgx-ai-panel .sgx-ai-tabs{display:flex;align-items:center;gap:6px;margin:0;padding:0;list-style:none}',
+    '#sgx-ai-panel .sgx-ai-tab{display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:6px;',
+    'font-size:12.5px;color:rgba(255,255,255,.72)}',
+    '#sgx-ai-panel .sgx-ai-tab.active{color:#fff;background:rgba(255,255,255,.08)}',
+    '#sgx-ai-panel .sgx-ic{flex:0 0 auto}',
+    '#sgx-ai-panel .sgx-ai-tools{display:flex;align-items:center;gap:4px}',
+    '#sgx-ai-panel .sgx-ai-tool{display:flex;align-items:center;justify-content:center;width:26px;height:26px;',
+    'padding:0;border:0;border-radius:6px;background:transparent;color:rgba(255,255,255,.66);cursor:pointer}',
+    '#sgx-ai-panel .sgx-ai-tool:hover{background:rgba(255,255,255,.10);color:#fff}',
+    '#sgx-ai-panel .sgx-ai-lang{padding:3px 8px;border-radius:6px;background:rgba(255,255,255,.06);',
+    'font-size:11.5px;color:rgba(255,255,255,.66)}',
+    /* лента: только чтение, ничего не печатается руками */
+    '#sgx-ai-panel .sgx-ai-log{max-height:46vh;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px}',
+    '#sgx-ai-panel .sgx-ai-msg{font-size:12.5px;line-height:1.5;color:rgba(255,255,255,.86)}',
+    '#sgx-ai-panel .sgx-ai-msg.me{align-self:flex-start;padding:6px 10px;border-radius:10px;',
+    'background:rgba(76,175,80,.16);color:#CFEBD2;font-size:12px}',
+    '#sgx-ai-panel .sgx-ai-msg.sys{color:rgba(255,255,255,.55);font-size:11.5px;font-style:italic}',
+    '#sgx-ai-panel .sgx-ai-code{margin:0;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.28);',
+    'color:#E6E6E6;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
+    'white-space:pre-wrap;overflow-wrap:anywhere}',
+    '#sgx-ai-panel .sgx-ai-err{margin:0;padding:9px 11px;border-radius:8px;background:rgba(229,115,115,.14);',
+    'border-left:3px solid #E57373;color:#F3D3D3;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
+    'white-space:pre-wrap;overflow-wrap:anywhere}',
+    /* «думает» — живой индикатор, чтобы было видно, что работа идёт */
+    '#sgx-ai-panel .sgx-ai-think{display:flex;align-items:center;gap:7px;font-size:12px;color:rgba(255,255,255,.6)}',
+    '#sgx-ai-panel .sgx-ai-dots{display:inline-flex;gap:3px}',
+    '#sgx-ai-panel .sgx-ai-dots span{width:5px;height:5px;border-radius:50%;background:currentColor;',
+    'animation:sgx-blink 1.2s ease-in-out infinite}',
+    '#sgx-ai-panel .sgx-ai-dots span:nth-child(2){animation-delay:.2s}',
+    '#sgx-ai-panel .sgx-ai-dots span:nth-child(3){animation-delay:.4s}',
+    '@keyframes sgx-blink{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:1;transform:translateY(-2px)}}',
     /* тонкая полоска сверху страницы — как встроенный индикатор сайта */
     '#sgx-progress{position:fixed;top:0;left:0;right:0;height:3px;z-index:2147483600;pointer-events:none}',
     '#sgx-progress>div{height:100%;width:0;background:#4CAF50;opacity:.85;transition:width .35s ease}',
@@ -1018,6 +1063,11 @@ var ICONS = {
       '<path d="M18.5 15.5l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z"/>',
     copy: '<rect x="9" y="9" width="11" height="11" rx="2"/>' +
       '<path d="M5 15V5a2 2 0 0 1 2-2h8"/>',
+    /* иконки блока ИИ — те же мотивы, что нарисованы у Stepik рядом с редактором:
+       «код» на вкладке и «веник» на кнопке сброса */
+    code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+    broom: '<path d="M19 3l-6.5 6.5"/><path d="M14 12l-3.5 3.5"/>' +
+      '<path d="M13.5 10.5a5 5 0 0 1-7 7l-3.5-3.5a5 5 0 0 1 7-7z"/>',
     sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>' +
       '<line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>' +
       '<line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>' +
@@ -1468,38 +1518,22 @@ async function jobCollect(ctx, target) {
   /* ------------------------------------------------------------------- ИИ */
 
   /* ИИ советует решение там, где в общей папке ответа ещё нет.
-     Ключа нет вовсе: обращаемся к бесплатному text.pollinations.ai, который
-     пускает анонимно (1 запрос в 15 с). Значит и воровать нечего, и лимит
-     не «утечёт»: он общий и восстановится сам через 15 секунд.
-     ИИ ничего не вставляет и не отправляет — только показывает текст решения,
-     чтобы человек сам решил, пользоваться им или нет. */
+     ИИ ничего не вставляет и не отправляет сам — показывает текст решения,
+     чтобы человек решил, пользоваться им или нет. */
 
-  /* Два канала: сначала бесплатный (ключ не нужен вообще — воровать нечего),
-     если он ответил «нет» — свой, ключевой. Порядок и лимиты подобраны живьём:
-     у бесплатного тайр «anonymous» отдаёт 1 запрос / 15 с, а при перегрузке
-     отвечает HTTP 402. Свой канал быстрее (glm-5.3-flash — около 5 с против
-     30 с у deepseek-v4-flash: тот reasoning-модель и жжёт токены на размышления). */
+  /* Канал один: свой ключ (api.reformboss.com/v1). Модель выбрана замером —
+     glm-5.3-flash отвечает около 5 с, а deepseek-v4-flash около 30 с: тот
+     reasoning-модель и жжёт бюджет на размышления. Бесплатный канал
+     (text.pollinations.ai) убран: анонимный тариф отвечал 402 через раз.    */
 
-  var AI_GAP = 16000;                  /* бесплатный тайр: 1 запрос / 15 с */
-  var AI_GAP_PAID = 1500;              /* свой ключ — только чтобы не долбить в цикле */
+  var AI_GAP = 1500;                   /* только чтобы не долбить сервис в цикле */
+  var AI_GAP_PAID = 1500;              /* то же самое для своего канала */
   var AI_WAIT_MAX = 3;                 /* столько секунд паузы пережидаем внутри, а не пропускаем канал */
   var AI_TRIES = 2;                    /* попыток на канал */
 
+  /* Канал один — свой, по ключу. Бесплатный (text.pollinations.ai) убран: у него
+     анонимный тариф отвечал 402 через раз, а решение нужно здесь и сейчас.        */
   var AI_CHANNELS = [
-    {
-      id: 'free', label: 'бесплатный', needKey: false,
-      url: 'https://text.pollinations.ai/openai',
-      models: ['openai-fast'],
-      headers: function () { return { 'Content-Type': 'application/json' }; },
-      body: function (model, system, user) {
-        return {
-          model: model,
-          messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-          max_tokens: 1600,
-          private: true
-        };
-      }
-    },
     {
       id: 'own', label: 'свой ключ', needKey: true,
       url: 'https://api.reformboss.com/v1/chat/completions',
@@ -1564,8 +1598,7 @@ async function jobCollect(ctx, target) {
     try { GM_setValue(AI_KEY, JSON.stringify(aiAnswer)); } catch (e) { /* ignore */ }
   }
 
-  /* Пауза считается по своему каналу: бесплатный ждёт свои 15 с, свой ключ — свои
-     1,5 с. Иначе после бесплатного запроса платный простаивал бы впустую. */
+  /* Пауза между запросами к своему каналу — чтобы не долбить сервис в цикле. */
   function aiLastOf(chId) {
     var t = 0;
     try { t = +(GM_getValue('aiLast_' + chId, 0) || 0); } catch (e) { t = 0; }
@@ -1659,6 +1692,24 @@ async function jobCollect(ctx, target) {
     return text.slice(0, 2500);
   }
 
+  /* Человеку показываем «Python 3.6», а не «text/x-python»: в панели рядом со
+     решением стоит метка языка, и MIME-строка там читается как мусор.            */
+  function langLabel(lang) {
+    var raw = String(lang || '');
+    var m = raw.toLowerCase();
+    var names = [
+      [/c#|csharp/, 'C#'], [/c\+\+/, 'C++'], [/python/, 'Python'], [/\bjava\b/, 'Java'],
+      [/javascript/, 'JavaScript'], [/typescript/, 'TypeScript'], [/\bsql\b/, 'SQL'],
+      [/kotlin/, 'Kotlin'], [/\bgo\b|golang/, 'Go'], [/haskell/, 'Haskell'],
+      [/pascal/, 'Pascal'], [/rust/, 'Rust'], [/ruby/, 'Ruby'], [/php/, 'PHP'],
+      [/swift/, 'Swift'], [/scala/, 'Scala'], [/^\s*r\s*$/, 'R'], [/bash|shell/, 'Shell']
+    ];
+    for (var i = 0; i < names.length; i++) {
+      if (names[i][0].test(m)) return names[i][1];
+    }
+    return raw.replace(/^[a-z]+\/x?-?/, '').replace(/src$/, '') || 'код';
+  }
+
   function stepLanguage() {
     var cm = $('.CodeMirror');
     if (cm && cm.CodeMirror && cm.CodeMirror.getOption) {
@@ -1689,6 +1740,12 @@ async function jobCollect(ctx, target) {
   }
 
   function aiUser() {
+    return aiUserFor(stepContext());
+  }
+
+  /* Запрос собираем от ctx, а не «от страницы»: при исправлении нужно то же самое
+     условие, что ушло в первый раз, иначе модель начнёт решать другую задачу. */
+  function aiUserFor(ctx) {
     var kind = stepKindNow();
     var lang = stepLanguage();
     var ask = kind === 'choice'
@@ -1701,7 +1758,66 @@ async function jobCollect(ctx, target) {
       ? '\nСверься с «Тестовые данные»: программа должна читать ровно то, что во «вход»,\n' +
         'и печатать ровно то, что в «выход».'
       : '';
-    return ask + hint + '\n\nУсловие:\n' + task;
+    var base = ask + hint + '\n\nУсловие:\n' + task;
+    if (ctx && ctx.prevCode) {
+      base += '\n\nТвой прошлый ответ:\n' + String(ctx.prevCode).slice(0, 1800);
+    }
+    if (ctx && ctx.checkError) {
+      base += '\n\nПроверка его отклонила. Отчёт проверяющей системы:\n' +
+        String(ctx.checkError).slice(0, 1400) +
+        '\n\nНайди причину и пришли исправленное решение целиком. ' +
+        'Если ошибка из-за чтения ввода — учитывай, что данные приходят через stdin, ' +
+        'а строки могут содержать кириллицу и пробелы.';
+    }
+    return base;
+  }
+
+  /* --------------------------------------------------- ошибки проверки и правка */
+
+  /* Stepik после неудачной отправки сам пишет, чем недоволен:
+     «Failed test #1 of 3. Runtime error … Test input: … Correct output: …
+     Your code output: … ValueError …». Это готовый разбор ошибки, и именно его
+     надо вернуть модели — иначе она будет угадывать, что не так.                */
+  function stepErrorText() {
+    var box = $('.submission-show__submission-hint') || $('.smart-hints');
+    var nodes = box ? $$('.smart-hints__hint', box) : $$('.smart-hints__hint');
+    var parts = [];
+    nodes.forEach(function (n) {
+      var t = norm(n.textContent || '');
+      if (t.length > 3) parts.push(t);
+    });
+    if (parts.length) return parts.join('\n');
+    return box ? norm(box.textContent || '') : '';
+  }
+
+  /* Ошибка бывает и без слова «Failed»: «Wrong answer», «Compilation error»,
+     «Time limit exceeded». Достаточно, чтобы отчёт появился и не был «верно». */
+  function looksLikeCheckError(text) {
+    var t = String(text || '');
+    if (t.length < 12) return false;
+    if (/correct|верно|принят|зачтено|Success/i.test(t) && !/Failed/i.test(t)) return false;
+    return /Failed|Wrong|Error|error|отличает|не совпад|expected|Traceback|Exception/i.test(t);
+  }
+
+  /* Собираем то, что ушло в прошлый раз: ответ модели и код, который на самом
+     деле стоит в редакторе. Если человек правил код руками — пошлём то, что он
+     правил, иначе модель начнёт исправлять свою же копию.                        */
+  function lastSubmissionCode() {
+    var fromEditor = readCodeFromEditor();
+    if (fromEditor && fromEditor.length > 3) return fromEditor;
+    return (aiAnswer && aiAnswer.text) || '';
+  }
+
+  /* Отчёт об ошибке приходит не мгновенно — ждём его появления. */
+  async function waitCheckError(timeoutMs) {
+    var t = typeof timeoutMs === 'number' ? timeoutMs : 20000;
+    var started = Date.now();
+    for (;;) {
+      var t0 = stepErrorText();
+      if (looksLikeCheckError(t0)) return t0;
+      if (Date.now() - started > t) return '';
+      await sleep(500);
+    }
   }
 
   /* Чем решали — показываем человеку: он должен понимать, какой канал сработал. */
@@ -1712,31 +1828,36 @@ async function jobCollect(ctx, target) {
 
   /* Человеку нужно понять, что делать, а не «HTTP 402». */
   function aiErrorText(status) {
-    if (status === 402) return 'бесплатный канал исчерпал лимит (402)';
+    if (status === 402) return 'сервис ИИ просит оплату (402)';
     if (status === 429) return 'лимит запросов (429), попробуй позже';
     if (status === 401 || status === 403) return 'ключ ИИ не принят (' + status + ')';
     if (status >= 500) return 'сервис ИИ недоступен (' + status + ')';
     return 'сервис ответил HTTP ' + status;
   }
 
-  async function askChannel(ch, ctx) {
+  /* mode: { retry:true } — первая попытка, ошибки канала пережидаем с паузой;
+     mode: { retry:false } — правка после проваленной проверки, тут ждать нельзя,
+     иначе человек будет смотреть на «думает» минуту.                            */
+  async function askChannel(ch, ctx, system, user, mode) {
+    var retry = !(mode && mode.retry === false);
+    var tries = retry ? AI_TRIES : 1;
     var key = ch.needKey ? aiKey() : '';
     var lastErr = null;
     for (var i = 0; i < ch.models.length; i++) {
       var model = ch.models[i];
-      for (var attempt = 0; attempt < AI_TRIES; attempt++) {
+      for (var attempt = 0; attempt < tries; attempt++) {
         try {
           var res = await fetch(ch.url, {
             method: 'POST',
             headers: ch.headers(key),
-            body: JSON.stringify(ch.body(model, aiSystem(), aiUser(ctx)))
+            body: JSON.stringify(ch.body(model, system || aiSystem(), user || aiUser(ctx)))
           });
           if (!res.ok) {
             lastErr = new Error(aiErrorText(res.status) + ' · ' + model);
             lastErr.status = res.status;
             /* 4xx повторять бессмысленно — ключ/лимит/модель не станут другими */
             if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
-            await sleep(700);
+            if (retry) await sleep(700);
             continue;
           }
           var data = await res.json();
@@ -1745,23 +1866,55 @@ async function jobCollect(ctx, target) {
           /* reasoning-модель могла не успеть доехать до ответа — тогда берём
              размышления как есть, лучше, чем ничего */
           if (!text && msg.reasoning_content) text = String(msg.reasoning_content).trim();
-          if (!text) { lastErr = new Error('пустой ответ от ' + model); await sleep(700); continue; }
+          if (!text) { lastErr = new Error('пустой ответ от ' + model); if (retry) await sleep(700); continue; }
           return { text: text, model: (data.model || model), channel: ch.id };
         } catch (e) {
           lastErr = e;
-          await sleep(700);
+          if (retry) await sleep(700);
         }
       }
     }
     throw lastErr || new Error('канал не ответил');
   }
 
-  async function askAi() {
+  /* Один заход к каналу с готовыми system/user. Возвращает { text, model, via }
+     или бросает последнюю ошибку — вызывающий решает, что с ней делать. */
+  async function aiCall(system, user, mode) {
+    var errors = [];
+    var list = aiChannels();
+    for (var i = 0; i < list.length; i++) {
+      var ch = list[i];
+      /* Короткую паузу пережидаем внутри, а не пропускаем канал: иначе отказ
+         одного запроса выглядел бы как «лимит» вместо решения. */
+      var myWait = aiWaitLeft(ch.id);
+      if (myWait && myWait <= AI_WAIT_MAX) { await sleep(myWait * 1000 + 100); myWait = 0; }
+      if (myWait) { errors.push(ch.label + ': ждать ' + myWait + ' с'); continue; }
+      try {
+        var got = await askChannel(ch, null, system, user, mode);
+        markAi(ch.id);
+        aiVia = ch.id;
+        return got;
+      } catch (e) {
+        markAi(ch.id);             /* при ошибке тоже не долбим сервис */
+        errors.push(ch.label + ': ' + e.message);
+      }
+    }
+    throw new Error(errors.join(' · ') || 'все каналы молчат');
+  }
+
+  async function askAi(opts) {
+    var fixed = !!(opts && opts.fixed);
     var ctx = stepContext();
     if (!ctx) { setStatus('ИИ: открой страницу задания'); return; }
     if (aiBusy) { setStatus('ИИ: уже думает…'); return; }
 
     var list = aiChannels();
+    /* Канал один, и без ключа он не работает: говорим об этом прямо, а не
+       «лимит канала, подожди 0 с» и не пустой строкой ошибки. */
+    if (!list.length) {
+      setStatus('ИИ: нет ключа — впиши его в меню «🔑 Настройки ИИ»');
+      return;
+    }
     var wait = aiWaitAny();
     if (wait) { setStatus('ИИ: лимит канала, подожди ' + wait + ' с'); return; }
 
@@ -1778,38 +1931,33 @@ async function jobCollect(ctx, target) {
     aiBusy = true;
     setStatus('ИИ думает над шагом ' + ctx.step + '…');
     setSiteProgress(0.5);
+    /* Показываем блок и ленту: человек должен видеть, что происходит, а не гадать */
+    aiShow(true);
+    if (!fixed) {
+      aiLogClear();
+      aiLogAdd('шаг ' + ctx.step + ' · ' + langLabel(stepLanguage()), 'sys');
+    }
+    var thinking = aiLogThink(fixed ? 'ИИ правит решение по ошибке теста' : 'ИИ думает над решением');
 
-    var errors = [];
-    var got = null;
     try {
-      for (var i = 0; i < list.length && !got; i++) {
-        var ch = list[i];
-        /* Пауза канала — это «не долбить ЭТОТ сервис дважды подряд», а не запрет
-           идти в следующий. Отказ бесплатного только что выставил aiLast, и по
-           нему короткая пауза своего канала (1,5 с) выглядела как «ещё рано» —
-           свой ключ молча пропускался. Ждём эти полторы секунды, а не отменяем
-           канал: пользователь просил запасной путь, он должен срабатывать. */
-        var myWait = aiWaitLeft(ch.id);
-        if (myWait && myWait <= AI_WAIT_MAX) { await sleep(myWait * 1000 + 100); myWait = 0; }
-        if (myWait) { errors.push(ch.label + ': ждать ' + myWait + ' с'); continue; }
-        if (i > 0) setStatus('бесплатный не смог — пробую ' + ch.label + '…');
-        try {
-          got = await askChannel(ch, ctx);
-          markAi(ch.id);
-          aiVia = ch.id;
-        } catch (e) {
-          markAi(ch.id);             /* при ошибке тоже не долбим сервис */
-          errors.push(ch.label + ': ' + e.message);
-        }
-      }
-      if (!got) throw new Error(errors.join(' · ') || 'все каналы молчат');
+      var got = await aiCall(aiSystem(), aiUserFor(ctx), { retry: !fixed });
 
-      aiAnswer = { key: ctx.key, text: got.text, at: Date.now(), model: got.model, kind: kind };
+      aiAnswer = {
+        key: ctx.key, text: got.text, at: Date.now(), model: got.model,
+        kind: kind, lang: stepLanguage()
+      };
+      dropThink(thinking);
       saveAi();
-      setStatus('ИИ: решение готово (шаг ' + ctx.step + ')');
+      setStatus((fixed ? 'ИИ: исправленное решение готово (шаг ' : 'ИИ: решение готово (шаг ') + ctx.step + ')');
       renderPanel(true);
-      showAi();
+      aiLogAnswer();
+      /* Кладём решение в общее хранилище — иначе кнопка «вставить» ищет ответ в
+         папке answers/, не находит и отвечает «в хранилище нет ответа». Заодно
+         решение уезжает остальным. Тихо: неудача публикации не должна ломать показ. */
+      saveAiToStore(ctx).catch(function (e) { log('публикация решения ИИ не удалась: ' + e.message); });
     } catch (e) {
+      dropThink(thinking);
+      aiLogAdd(e.message, 'err');
       setStatus('ИИ не ответил — ' + e.message);
     } finally {
       aiBusy = false;
@@ -1817,36 +1965,238 @@ async function jobCollect(ctx, target) {
     }
   }
 
-  /* окно с решением: текст, кнопка «скопировать» и ничего больше */
-  function showAi() {
-    if (!aiAnswer || !aiAnswer.text) return;
-    var old = document.getElementById('sgx-ai');
-    if (old) old.remove();
-    var box = document.createElement('div');
-    box.id = 'sgx-ai';
-    box.innerHTML = [
-      '<div class="sgx-ai-head"><span>Решение от ИИ</span>',
-      '<button class="sgx-ai-x" type="button" title="Закрыть">' + icon('close', 14) + '</button></div>',
-      '<textarea class="sgx-ai-text" readonly></textarea>',
-      '<div class="sgx-ai-foot">',
-      '<span class="sgx-ai-note">проверь перед отправкой · ' +
-      (aiViaText() ? aiViaText() + ' · ' : '') + aiAnswer.model + '</span>',
-      '<button class="sgx-ai-copy" type="button">' + icon('copy', 14) + 'Скопировать</button>',
-      '</div>'
-    ].join('');
-    document.body.appendChild(box);
-    box.querySelector('.sgx-ai-text').value = aiAnswer.text;
-    box.querySelector('.sgx-ai-x').addEventListener('click', function () { box.remove(); });
-    box.querySelector('.sgx-ai-copy').addEventListener('click', function () {
-      var ta = box.querySelector('.sgx-ai-text');
-      ta.removeAttribute('readonly');
-      ta.select();
-      var done = false;
-      try { done = document.execCommand('copy'); } catch (e) { done = false; }
-      ta.setAttribute('readonly', 'readonly');
-      if (!done) { toast('Не скопировалось — выдели текст и нажми Ctrl+C', true); return; }
-      toast('Скопировано');
+  /* Сайт отклонил отправку и написал, чем именно. Это готовая подсказка: отдаём
+     её модели вместе с её же кодом и просим исправить. Число правок ограничено —
+     иначе на «неверно» можно зациклиться и жечь лимит бесконечно.                */
+  var aiFixTried = {};
+  var aiFixBusy = {};                   /* защёлка: одну отправку правим один раз */
+  var AI_FIX_MARKS = 2;                 /* столько правок на один шаг */
+
+  async function aiSelfCorrect(ctx) {
+    if (!ctx || !aiAnswer || aiAnswer.key !== ctx.key) return { skipped: 'нет решения ИИ' };
+    /* Счётчик тратится только на настоящую правку: если ошибки не оказалось
+       (ответ прошёл), попытка не сгорает. */
+    if ((aiFixTried[ctx.key] || 0) >= AI_FIX_MARKS) return { skipped: 'правка уже была' };
+
+    var err = await waitCheckError(20000);
+    if (!err) return { skipped: 'ошибку проверки не нашли' };
+
+    if (!aiChannels().length) {
+      aiLogAdd('ИИ: ошибку вижу, но ключа нет — впиши его в «🔑 Настройки ИИ»', 'err');
+      return { skipped: 'нет ключа' };
+    }
+
+    aiFixTried[ctx.key] = (aiFixTried[ctx.key] || 0) + 1;
+    var prev = aiAnswer.text;
+    var was = aiVia;
+    aiLogAdd(err, 'err');
+    aiLogAdd('пробую исправить сам…', 'sys');
+
+    var fixCtx = Object.assign({}, ctx);
+    try { fixCtx.prevCode = await lastSubmissionCode(); } catch (e) { fixCtx.prevCode = prev; }
+    fixCtx.checkError = err;
+
+    var got = null;
+    try {
+      got = await aiCall(aiSystem(), aiUserFor(fixCtx), { retry: false });
+    } catch (e) {
+      aiLogAdd('ИИ не смог исправить — ' + e.message, 'err');
+      return { skipped: 'ошибка канала: ' + e.message };
+    }
+
+    aiAnswer = {
+      key: ctx.key, text: got.text, at: Date.now(), model: got.model,
+      kind: aiAnswer.kind || 'code', lang: aiAnswer.lang || stepLanguage()
+    };
+    saveAi();
+    aiLogAnswer();
+    aiVia = was;                        /* чем решали в итоге — показываем то же */
+    renderPanel(true);
+
+    /* Правку показываем только в ленте, но в панели уже стоит новое решение:
+       человек сам решает, отправлять его повторно или нет. Автоматически не
+       жмём «Отправить» — отправка наружу только по подтверждению.               */
+    setStatus('ИИ: решение исправлено — проверь и отправь снова');
+    saveAiToStore(ctx).catch(function (e) { log('публикация правки ИИ не удалась: ' + e.message); });
+    return { fixed: true };
+  }
+
+  /* Отдаём панели: она зовёт это после нажатия «Отправить на проверку».
+     Само исправление тихое: ошибка канала не должна всплывать поверх урока.
+     Одну и ту же отправку ловят два пути (сеть и клик), поэтому на шаг держим
+     одну защёлку — иначе пойдут две правки подряд и сгорит лимит.             */
+  function nudgeFix(ctx) {
+    var c = ctx || stepContext();
+    if (!c || !aiAnswer || aiAnswer.key !== c.key) return;
+    if (!aiChannels().length) return;
+    if (aiFixBusy[c.key]) return;
+    aiFixBusy[c.key] = true;
+    setTimeout(function () {
+      aiSelfCorrect(c)
+        .catch(function (e) { log('правка ИИ не удалась: ' + (e && e.message)); })
+        .then(function () { delete aiFixBusy[c.key]; });
+    }, 1200);
+  }
+
+  /* ИИ на тесте с выбором отвечает текстом: «2. Вариант такой-то». Сопоставляем
+     ответ с реальными вариантами на странице и берём те, что совпали — по тексту
+     или по номеру. Если не совпало ничего, отдаём как есть: пусть writeChoice
+     скажет, что не нашёл, а не соврёт про успех.                                */
+  function choiceFromText(text) {
+    var body = String(text || '');
+    var inputs = $$('.quiz-component[data-type="choice-quiz"] input, .quiz-plugin__content input')
+      .filter(function (i) { return /radio|checkbox/.test(i.type) && !i.disabled; });
+    if (!inputs.length) return null;
+
+    var answers = [];
+    var ids = [];
+    inputs.forEach(function (inp, idx) {
+      var label = inp.closest('label') || inp.parentElement;
+      var txt = norm((label || {}).textContent || '');
+      if (!txt) return;
+      /* по тексту варианта */
+      if (body.indexOf(txt) >= 0) { answers.push(txt); ids.push(String(inp.value)); return; }
+      /* по номеру: строки вида «2) …» или «2. …» или «ответ: 2» */
+      var num = new RegExp('(?:^|[^\\d])' + (idx + 1) + '\\s*[).:—-]', 'm');
+      if (num.test(body)) { answers.push(txt); ids.push(String(inp.value)); }
     });
+    if (!answers.length) return null;
+    return { kind: 'choice', answers: answers, ids: ids, source: 'ии' };
+  }
+
+  /* Решение ИИ уезжает в общее хранилище: иначе кнопка «вставить» ищет ответ
+     в папке answers/ и отвечает «в хранилище нет ответа для <ключ>». Заодно
+     решение становится доступно остальным. Для теста с выбором ответ приходит
+     текстом, поэтому приводим его к тому же виду, что и автосохранение.         */
+  async function saveAiToStore(ctx) {
+    if (!aiAnswer || aiAnswer.key !== ctx.key || !aiAnswer.text) return { skipped: true };
+    if (!cfg.token) return { skipped: true };          /* без токена публиковать некуда */
+    var kind = aiAnswer.kind === 'choice' ? 'choice' : 'code';
+    var content = aiAnswer.text;
+    /* У теста с выбором ответ модели — текст, а хранилищу нужны варианты. Если
+       сопоставить не вышло, это не повод класть мусор: говорим честно.            */
+    if (kind === 'choice') {
+      var picked = choiceFromText(content);
+      if (!picked) {
+        log('решение ИИ для теста с выбором не сопоставилось с вариантами — в хранилище не кладу');
+        return { skipped: 'варианты не распознаны' };
+      }
+      content = JSON.stringify(picked);
+    }
+    /* Расширение выбирает вид ответа, а не язык: у теста с выбором это всегда .json
+       (иначе файл ложился как .txt и «вставить» его не находил).                   */
+    var ext = kind === 'choice' ? 'json' : extOf(aiAnswer.lang || '');
+    var res = await saveAnswer(ctx, {
+      kind: kind, ext: ext, content: content
+    }, true);
+    if (res && res.key) {
+      aiAnswer.saved = { key: res.key, kind: kind };
+      saveAi();
+    }
+    return res;
+  }
+
+  /* --------------------------------------------------------- лента решения ИИ */
+
+  /* Блок ИИ — не окно поверх страницы, а часть панели: показываем его только
+     после «Спросить ИИ по шагу» и наполняем лентой сообщений. Печатать в ленте
+     нельзя, поэтому это не textarea, а набор блоков: так человек видит и ход
+     работы («думает»), и ошибки тестов, и итоговый код.                        */
+  function aiPanelEl() { return document.getElementById('sgx-ai-panel'); }
+
+  function aiLogEl() { return document.getElementById('sgx-ai-log'); }
+
+  /* Панель создаётся по нажатию кнопки в шапке. Но спросить ИИ можно и из меню
+     Tampermonkey — тогда панели ещё нет, и все записи в ленту молча уходили в
+     никуда: человек открывал панель и видел пустоту. Поэтому вызываем создание
+     панели сами и только потом показываем блок.                                 */
+  function aiShow(on) {
+    if (on === false) {
+      var off = aiPanelEl();
+      if (off) off.hidden = true;
+      return;
+    }
+    if (!aiPanelEl()) {
+      ensurePanel();
+      sidebarSlot();
+    }
+    var box = aiPanelEl();
+    if (box) box.hidden = false;
+  }
+
+  function aiLogClear() {
+    var log = aiLogEl();
+    if (log) log.innerHTML = '';
+    return log;
+  }
+
+  /* одна строка в ленте. kind: 'me' — наш вопрос, 'sys' — служебное, 'err' — ошибка */
+  function aiLogAdd(text, kind, monospace) {
+    var log = aiLogEl();
+    if (!log || !text) return null;
+    var el = document.createElement('div');
+    el.className = 'sgx-ai-msg' + (kind ? ' ' + kind : '') + (monospace ? ' sgx-ai-code' : '');
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+
+  /* индикатор «думает» — чтобы было видно, что скрипт жив, а не завис */
+  function aiLogThink(label) {
+    var log = aiLogEl();
+    if (!log) return null;
+    var el = document.createElement('div');
+    el.className = 'sgx-ai-think';
+    el.innerHTML = '<span>' + escapeHtml(label || 'ИИ думает') + '</span>' +
+      '<span class="sgx-ai-dots"><span></span><span></span><span></span></span>';
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  /* Убрать индикатор «думает»: держать его рядом с готовым ответом нельзя —
+     выглядит так, будто работа ещё идёт. */
+  function dropThink(el) {
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+
+  /* Скопировать текст в буфер. В ленте нет поля ввода, поэтому копируем через
+     временную textarea; если и это недоступно — показываем текст диалогом, чтобы
+     человек мог забрать решение руками. */
+  function copyText(text) {
+    var s = String(text == null ? '' : text);
+    if (!s) return;
+    var ta = document.createElement('textarea');
+    ta.value = s;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    if (ok) toast('✓ Решение скопировано');
+    else if (window.prompt) window.prompt('Скопируй решение:', s);
+  }
+
+  /* Показать готовое решение в ленте — с подписью, чем решено и на каком языке. */
+  function aiLogAnswer() {
+    if (!aiAnswer || !aiAnswer.text) return;
+    aiLogAdd(aiAnswer.text, '', true);
+    aiLogAdd('проверь перед отправкой · ' + (aiViaText() ? aiViaText() + ' · ' : '') + aiAnswer.model, 'sys');
+    var lang = document.getElementById('sgx-ai-lang');
+    if (lang) lang.textContent = langLabel(aiAnswer.lang);
+  }
+
+  function aiAnswerAt(key) {
+    return aiAnswer && aiAnswer.key === key ? aiAnswer.text : '';
   }
 
   /* ------------------------------------------------ структура курса и план */
@@ -2014,7 +2364,22 @@ async function jobCollect(ctx, target) {
       '<button class="sgx-btn danger" id="sgx-stop" type="button">' + icon('stop', 14) +
       'Остановить</button>',
       '<div class="sgx-progress"><div class="sgx-bar" id="sgx-bar"></div></div>',
-      '<div class="sgx-status" id="sgx-status"></div>'
+      '<div class="sgx-status" id="sgx-status"></div>',
+      /* Блок ИИ: появляется только после «Спросить ИИ по шагу». Оформлен как
+         родной редактор кода Stepik — вкладка «Код», копирование, сброс, язык.
+         Внутри не поле ввода, а лента сообщений: человек только читает. */
+      '<div class="sgx-ai" id="sgx-ai-panel" hidden>',
+      '<div class="sgx-ai-head">',
+      '<ul class="sgx-ai-tabs"><li class="sgx-ai-tab active">' + icon('code', 14) + 'Ответ</li></ul>',
+      '<div class="sgx-ai-tools">',
+      '<button class="sgx-ai-tool" id="sgx-ai-copy" type="button" title="Скопировать решение">' +
+      icon('copy', 14) + '</button>',
+      '<button class="sgx-ai-tool" id="sgx-ai-reset" type="button" title="Сбросить">' +
+      icon('broom', 14) + '</button>',
+      '<span class="sgx-ai-lang" id="sgx-ai-lang">Python 3.6</span>',
+      '</div></div>',
+      '<div class="sgx-ai-log" id="sgx-ai-log"></div>',
+      '</div>'
     ].join('');
 
     panel.querySelector('.sgx-close').addEventListener('click', function () { openPanel(false); });
@@ -2022,7 +2387,24 @@ async function jobCollect(ctx, target) {
     panel.querySelector('#sgx-collect').addEventListener('click', function () { beginJob('collect'); });
     panel.querySelector('#sgx-stop').addEventListener('click', function () { stopJob('остановлено'); });
     panel.querySelector('#sgx-open').addEventListener('click', function () { redownload(); });
-    panel.querySelector('#sgx-ai-btn').addEventListener('click', function () { askAi(); });
+    panel.querySelector('#sgx-ai-btn').addEventListener('click', function () {
+      var ctx = stepContext();
+      var again = aiAnswer && ctx && aiAnswer.key === ctx.key;
+      askAi({ fixed: !!again });
+    });
+
+    /* Кнопки блока ИИ — как в родном редакторе Stepik: скопировать решение и
+       сбросить ленту. Печатать здесь нечего, поэтому кроме этих двух действий
+       в блоке ничего не нажимается. */
+    panel.querySelector('#sgx-ai-copy').addEventListener('click', function () {
+      var text = aiAnswerAt(stepContext().key) || (aiAnswer && aiAnswer.text) || '';
+      if (!text) { toast('Копировать нечего — ИИ ещё не отвечал на этом шаге'); return; }
+      copyText(text);
+    });
+    panel.querySelector('#sgx-ai-reset').addEventListener('click', function () {
+      aiLogClear();
+      aiShow(false);
+    });
     /* Вставляем сразу в боковое меню (или в body, если меню ещё не отрисовано):
        без appendChild элемент не попадает в документ, и getElementById его не найдёт. */
     var host = $('.lesson-sidebar__content') || document.body;
@@ -2294,9 +2676,28 @@ async function jobCollect(ctx, target) {
           tried[ctx.key] = null;         /* сохраняем сразу, не дожидаясь таймера */
           setTimeout(tick, 0);
         }
+      } else if (ctx && s.status && s.status !== 'correct') {
+        /* Отправка не прошла. Если на этом шаге решал ИИ — самое время прочитать
+           ошибку и попробовать исправить: человек не должен разбираться сам. */
+        nudgeFix(ctx);
       }
     });
   });
+
+  /* Отправку ловим не только по сети: если ответ сохранён из кэша и ушёл не
+     через перехваченный fetch, ошибку всё равно надо увидеть. Кнопка сайта
+     подписана «Отправить на проверку», её и слушаем — в фазе перехвата,
+     чтобы не мешать самому Stepik.                                              */
+  document.addEventListener('click', function (e) {
+    var b = e.target && e.target.closest
+      ? e.target.closest('button, .button, .quiz-plugin__submit, .attempt-wrapper__submit')
+      : null;
+    if (!b) return;
+    var label = norm(b.textContent || '');
+    if (!/Отправить на проверку|Submit/i.test(label)) return;
+    var ctx = stepContext();
+    if (ctx) nudgeFix(ctx);
+  }, true);
 
   /* --------------------------------------------------- горячие клавиши */
 
@@ -2461,17 +2862,22 @@ async function jobCollect(ctx, target) {
 
     GM_registerMenuCommand('📋 Показать решение от ИИ', function () {
       if (!aiAnswer || !aiAnswer.text) { toast('ИИ ещё ничего не присылал на этом шаге'); return; }
-      showAi();
+      if (!openPanel(true)) return;
+      aiShow(true);
+      aiLogClear();
+      aiLogAdd('шаг ' + (aiAnswer.key || stepContext().key || ''), 'sys');
+      aiLogAnswer();
+      renderPanel(true);
     });
 
     GM_registerMenuCommand('🔑 Настройки ИИ', function () {
-      var k = prompt('Ключ своего канала ИИ (api.reformboss.com).\n' +
-        'Пусто — останется только бесплатный канал.\n' +
+      var k = prompt('Ключ канала ИИ (api.reformboss.com).\n' +
+        'Пусто — ИИ выключается совсем.\n' +
         'Внимание: ключ, вписанный сюда, виден в настройках скрипта у того, кто его поставил.',
         cfg.aiKey || aiKey());
       if (k === null) return;
       setAiKey(k.trim());
-      toast(k.trim() ? '✓ Ключ сохранён' : '✓ Ключ убран — только бесплатный канал');
+      toast(k.trim() ? '✓ Ключ сохранён' : '✓ Ключ убран — ИИ выключен');
     });
 
     GM_registerMenuCommand('🔄 Обновить список ответов', function () {
