@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      5.1.0
+// @version      5.2.0
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет».
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -51,7 +51,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '5.1.0';
+  var VERSION = '5.2.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -265,27 +265,11 @@
   async function findStepId(ctx) {
     if (stepIdCache[ctx.key]) return stepIdCache[ctx.key];
 
-    if (stepIds[ctx.lesson] === undefined) {
-      var list = [];
-      try {
-        var d = await sk('/api/lessons?ids[]=' + ctx.lesson);
-        list = (d.lessons && d.lessons[0] && d.lessons[0].steps) || [];
-      } catch (e) { /* приватный урок */ }
-      if (!list.length) {
-        /* тот же список другим эндпоинтом: иногда отвечает, когда первый пуст */
-        try {
-          var d2 = await sk('/api/steps?lesson=' + ctx.lesson);
-          var arr = d2.steps || [];
-          arr.sort(function (a, b) { return (a.position || 0) - (b.position || 0); });
-          list = arr.map(function (s) { return s.id; });
-        } catch (e2) { /* ignore */ }
-      }
-      stepIds[ctx.lesson] = list.length ? list : null;
-    }
-
-    var guess = stepIds[ctx.lesson] && stepIds[ctx.lesson][ctx.step - 1];
+    var list = await lessonSteps(ctx.lesson);
+    var guess = list && list[ctx.step - 1];
     if (guess) { stepIdCache[ctx.key] = guess; return guess; }
 
+    /* списка шагов нет — проверяем id, подсмотренный в запросах Stepik */
     if (netStep && await stepMatches(netStep, ctx)) {
       stepIdCache[ctx.key] = netStep;
       return netStep;
@@ -713,7 +697,9 @@
     '#sgx-panel button.danger{background:#E05A4A;color:#fff}',
     '#sgx-panel button:disabled{opacity:.45;cursor:default}',
     '#sgx-status{margin:2px 0 8px;color:#5C5854;min-height:18px}',
-    '#sgx-panel #sgx-total{color:#8A8783;font-size:12px}'
+    '#sgx-panel select{flex:1;padding:7px 9px;border:1px solid #D5D3D0;border-radius:7px;font:inherit;',
+    'background:#fff;color:inherit}',
+    '#sgx-panel #sgx-total{color:#8A8783;font-size:12px;margin-left:auto;white-space:nowrap}'
   ].join(''));
 
   var chip = null, chipAnchor = null, toastEl = null, toastTimer = null;
@@ -892,10 +878,12 @@
 
   /* ==================================================== панель «от и до» */
 
-  /* Пройти пачку заданий: вставить сохранённые ответы и отправить.
-     Собрать пачку в Word: снять скриншоты заданий (с кодом) и сложить в .docx.
-     Обход живёт в GM-хранилище и переживает перезагрузку страницы: скрипт
-     переходит на следующий шаг обычной навигацией и продолжает там. */
+  /* Структура курса Stepik: в боковом меню — уроки с номерами вида 4.1, 4.2, 4.3,
+     а внутри урока — шаги (те самые зелёные квадратики сверху). Поэтому диапазон
+     задаётся либо уроками («с 4.1 по 4.3» — весь курс от урока до урока), либо
+     шагами одного урока.
+     Обход — это очередь пар (урок, шаг) в GM-хранилище: скрипт переходит на
+     следующий шаг обычной навигацией и продолжает работу после перезагрузки. */
 
   var JOB_KEY = 'job';
   var job = null;
@@ -907,21 +895,20 @@
     try { GM_setValue(JOB_KEY, JSON.stringify(job)); } catch (e) { log('не сохранил задание:', e.message); }
   }
 
-  function jobStep() { return job ? job.at : null; }
+  function jobTotal() { return job && job.plan ? job.plan.length : 0; }
 
   function setStatus(text) {
     var el = document.getElementById('sgx-status');
     if (el) el.textContent = text || '';
     var fab = document.getElementById('sgx-fab');
     if (fab) {
-      var busy = !!job;
-      fab.textContent = busy ? ('иду: шаг ' + job.at + ' из ' + job.to) : 'от и до';
-      fab.classList.toggle('busy', busy);
+      fab.textContent = job ? ('иду: ' + (job.at + 1) + ' из ' + jobTotal()) : 'от и до';
+      fab.classList.toggle('busy', !!job);
     }
   }
 
-  function startJob(kind, lesson, from, to) {
-    job = { kind: kind, lesson: String(lesson), from: from, to: to, at: from, shots: [] };
+  function startJob(kind, plan, title) {
+    job = { kind: kind, plan: plan, at: 0, shots: [], title: title };
     saveJob();
     renderPanel();
     setStatus(kind === 'solve' ? 'пошёл по заданиям' : 'собираю скриншоты');
@@ -943,15 +930,20 @@
 
   async function runJob(ctx) {
     if (!job || jobBusy) return;
-    if (String(job.lesson) !== String(ctx.lesson)) return;
-    if (ctx.step !== job.at) { goToStep(job.lesson, job.at); return; }
+    var target = job.plan && job.plan[job.at];
+    if (!target) return finishJob();
+
+    if (String(ctx.lesson) !== String(target.lesson) || ctx.step !== target.step) {
+      goToStep(target.lesson, target.step);
+      return;
+    }
 
     jobBusy = true;
     try {
-      if (job.kind === 'solve') await jobSolve(ctx);
-      else await jobCollect(ctx);
+      if (job.kind === 'solve') await jobSolve(ctx, target);
+      else await jobCollect(ctx, target);
     } catch (e) {
-      setStatus('ошибка на шаге ' + job.at + ': ' + e.message);
+      setStatus('ошибка на ' + target.label + ': ' + e.message);
       await sleep(1500);
       nextJobStep();
     } finally {
@@ -961,13 +953,17 @@
 
   function nextJobStep() {
     if (!job) return;
-    if (job.at >= job.to) {
-      if (job.kind === 'collect') return finishCollect();
-      return stopJob('готово: прошёл шаги ' + job.from + '–' + job.to);
-    }
     job.at++;
     saveJob();
-    goToStep(job.lesson, job.at);
+    var target = job.plan && job.plan[job.at];
+    if (!target) return finishJob();
+    goToStep(target.lesson, target.step);
+  }
+
+  function finishJob() {
+    if (!job) return;
+    if (job.kind === 'collect') return finishCollect();
+    stopJob('готово: прошёл ' + jobTotal() + ' заданий');
   }
 
   var SUBMIT_RE = /^(отправить|решить|проверить|submit|send)$/i;
@@ -983,37 +979,37 @@
     return null;
   }
 
-  async function jobSolve(ctx) {
-    setStatus('шаг ' + job.at + ' из ' + job.to + ': вставляю ответ');
+  async function jobSolve(ctx, target) {
+    setStatus((job.at + 1) + ' из ' + jobTotal() + ': ' + target.label + ' — вставляю ответ');
     var res;
     try {
       res = await insertSaved(ctx);
     } catch (e) {
-      setStatus('шаг ' + job.at + ': ' + e.message + ' — пропускаю');
+      setStatus(target.label + ': ' + e.message + ' — пропускаю');
       await sleep(1500);
       return nextJobStep();
     }
     await sleep(500);
     var btn = submitButton();
     if (!btn) {
-      setStatus('шаг ' + job.at + ': ответ вставил, но кнопки «Отправить» нет — пропускаю');
+      setStatus(target.label + ': ответ вставил, но кнопки «Отправить» нет — пропускаю');
       await sleep(1500);
       return nextJobStep();
     }
     btn.click();
-    setStatus('шаг ' + job.at + ' из ' + job.to + ': отправлено');
+    setStatus((job.at + 1) + ' из ' + jobTotal() + ': ' + target.label + ' отправлено');
     await sleep(2500);
     return nextJobStep();
   }
 
-  async function jobCollect(ctx) {
-    setStatus('шаг ' + job.at + ' из ' + job.to + ': снимаю скриншот');
-    var shot = await shootStep(ctx);
+  async function jobCollect(ctx, target) {
+    setStatus((job.at + 1) + ' из ' + jobTotal() + ': ' + target.label + ' — снимаю скриншот');
+    var shot = await shootStep(ctx, target);
     if (shot) {
-      job.shots.push({ step: ctx.step, title: stepTitle(ctx), img: shot.img, w: shot.w, h: shot.h });
+      job.shots.push(shot);
       try { saveJob(); } catch (e) { log(e); }
     } else {
-      setStatus('шаг ' + job.at + ': скриншот не получился — пропускаю');
+      setStatus(target.label + ': скриншот не получился — пропускаю');
       await sleep(1000);
     }
     return nextJobStep();
@@ -1021,7 +1017,7 @@
 
   /* ------------------------------------------------------------- скриншот */
 
-  function stepTitle(ctx) {
+  function stepTitle(ctx, target) {
     var card = $('.attempt-wrapper__content') || document.body;
     var head = '';
     var nodes = $$('.step-text, .problem__header, .attempt-wrapper__content h1, .text, .step-title', card);
@@ -1029,16 +1025,17 @@
       var t = norm(nodes[i].textContent);
       if (t.length > 3) { head = t.slice(0, 90); break; }
     }
-    return 'Шаг ' + ctx.step + (head ? '. ' + head : '');
+    var where = (target && target.label) || ('шаг ' + ctx.step);
+    return where + (head ? '. ' + head : '');
   }
 
-  async function shootStep(ctx) {
+  async function shootStep(ctx, target) {
     if (typeof html2canvas !== 'function') {
       log('html2canvas не загрузился — соберу документ без скриншотов');
       return null;
     }
-    var target = insertTarget();
-    var card = (target && cardOf(target.anchor)) || $('.attempt-wrapper__content') || document.body;
+    var el = insertTarget();
+    var card = (el && cardOf(el.anchor)) || $('.attempt-wrapper__content') || document.body;
     var rect = card.getBoundingClientRect();
     if (rect.height < 40) return null;
 
@@ -1079,7 +1076,10 @@
         out = canvas;
       }
     }
-    return { img: out.toDataURL('image/png'), w: out.width, h: out.height };
+    return {
+      step: ctx.step, lesson: ctx.lesson, title: stepTitle(ctx, target),
+      img: out.toDataURL('image/png'), w: out.width, h: out.height
+    };
   }
 
   /* ---------------------------------------------------------- документ .docx */
@@ -1110,7 +1110,6 @@
     opts = opts || {};
     var run = '<w:rPr>' +
       (opts.bold ? '<w:b/>' : '') +
-      (opts.mono ? '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/><w:sz w:val="18"/>' : '') +
       (opts.size ? '<w:sz w:val="' + opts.size + '"/>' : '') +
       '</w:rPr>';
     return '<w:p><w:pPr>' + (opts.spacing ? '<w:spacing w:before="' + opts.spacing + '"/>' : '') + '</w:pPr>' +
@@ -1138,7 +1137,7 @@
     var word = zip.folder('word');
     var media = word.folder('media');
     var rels = [];
-    var body = [docxParagraph(title || 'Задания Stepik', { bold: true, size: '32', spacing: '0' })];
+    var body = [docxParagraph(title || 'Задания Stepik', { bold: true, size: '32' })];
     body.push(docxParagraph('Собрано скриптом Stepik ⇄ Ответы · ' + nowIso().slice(0, 16).replace('T', ' ')));
 
     var n = 0;
@@ -1191,13 +1190,18 @@
     setTimeout(function () { a.remove(); }, 2000);
   }
 
+  function docName() {
+    var t = (job && job.title) || 'сборка';
+    return 'stepik-' + t.replace(/[^\wА-Яа-яЁё.-]+/g, '_').slice(0, 60) + '.docx';
+  }
+
   async function finishCollect() {
     var shots = (job && job.shots) || [];
-    var name = 'stepik-задания-' + (job ? job.lesson + '-шаги-' + job.from + '-' + job.to : 'сборка') + '.docx';
+    var title = 'Задания Stepik · ' + ((job && job.title) || 'сборка');
     setStatus('собираю документ (' + shots.length + ' скриншотов)');
     try {
-      var blob = await buildDocx(shots, 'Задания Stepik · урок ' + (job ? job.lesson : '') +
-        ', шаги ' + (job ? job.from + '–' + job.to : ''));
+      var blob = await buildDocx(shots, title);
+      var name = docName();
       stopJob('готово: ' + shots.length + ' скриншотов, документ скачивается');
       downloadBlob(blob, name);
       renderPanel(true);
@@ -1206,21 +1210,140 @@
     }
   }
 
+  /* ------------------------------------------------ структура курса и план */
+
+  /* Уроки берём из бокового меню: там они подписаны номерами вида 4.1 — ровно так,
+     как их видит человек. Никаких догадок про api/sections. */
+  function lessonList() {
+    var out = [], seen = {};
+    $$('a[href*="/lesson/"]').forEach(function (a) {
+      var m = /\/lesson\/(\d+)/.exec(a.getAttribute('href') || '');
+      if (!m) return;
+      var id = m[1];
+      if (seen[id]) return;
+      var label = norm(a.textContent);
+      var num = /^(\d{1,3})\.(\d{1,3})/.exec(label);
+      if (!num) return;
+      seen[id] = 1;
+      out.push({
+        id: id, label: num[1] + '.' + num[2],
+        section: +num[1], unit: +num[2],
+        title: label.replace(/^\d{1,3}\.\d{1,3}\s*/, '')
+      });
+    });
+    out.sort(function (a, b) { return (a.section - b.section) || (a.unit - b.unit); });
+    return out;
+  }
+
+  async function lessonSteps(lessonId) {
+    if (stepIds[lessonId] === undefined) {
+      var list = [];
+      try {
+        var d = await sk('/api/lessons?ids[]=' + lessonId);
+        list = (d.lessons && d.lessons[0] && d.lessons[0].steps) || [];
+      } catch (e) { /* приватный урок */ }
+      if (!list.length) {
+        try {
+          var d2 = await sk('/api/steps?lesson=' + lessonId);
+          var arr = d2.steps || [];
+          arr.sort(function (a, b) { return (a.position || 0) - (b.position || 0); });
+          list = arr.map(function (s) { return s.id; });
+        } catch (e2) { /* ignore */ }
+      }
+      stepIds[lessonId] = list.length ? list : null;
+    }
+    return stepIds[lessonId];
+  }
+
+  async function lessonPlan(lessons) {
+    var plan = [], missing = [];
+    for (var i = 0; i < lessons.length; i++) {
+      var ids = await lessonSteps(lessons[i].id);
+      if (!ids || !ids.length) { missing.push(lessons[i].label); continue; }
+      for (var s = 1; s <= ids.length; s++) {
+        plan.push({ lesson: lessons[i].id, step: s, label: lessons[i].label + '.' + s });
+      }
+    }
+    if (missing.length) log('не вижу список шагов у уроков: ' + missing.join(', '));
+    return plan;
+  }
+
+  function lessonsInRange(fromLabel, toLabel) {
+    var all = lessonList();
+    if (!all.length) {
+      throw new Error('не нашёл список уроков — открой страницу курса или урока');
+    }
+    var key = function (s) { return String(s || '').trim().replace(',', '.').replace(/\s+/g, ''); };
+    var a = key(fromLabel), b = key(toLabel);
+    var pick = function (v) {
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].label === v || all[i].title.toLowerCase() === v.toLowerCase()) return i;
+      }
+      return -1;
+    };
+    var i = pick(a), j = pick(b);
+    if (i < 0) throw new Error('в меню курса нет урока «' + fromLabel + '»');
+    if (j < 0) throw new Error('в меню курса нет урока «' + toLabel + '»');
+    if (j < i) { var t = i; i = j; j = t; }
+    return all.slice(i, j + 1);
+  }
+
+  function stepsPlan(ctx, from, to) {
+    var plan = [];
+    for (var s = from; s <= to; s++) plan.push({ lesson: ctx.lesson, step: s, label: 'шаг ' + s });
+    return plan;
+  }
+
   /* --------------------------------------------------------------- панель */
+
+  function mode() {
+    var sel = document.getElementById('sgx-mode');
+    return sel ? sel.value : 'lessons';
+  }
 
   function renderPanel(keepStatus) {
     var panel = document.getElementById('sgx-panel');
     if (!panel) return;
     var from = document.getElementById('sgx-from');
     var to = document.getElementById('sgx-to');
+    var list = document.getElementById('sgx-lessons');
     var ctx = stepContext();
-    var total = ctx && stepIds[ctx.lesson] ? stepIds[ctx.lesson].length : 0;
+    var lessons = lessonList();
+    var bySteps = mode() === 'steps';
+
+    /* подсказки: в режиме уроков — номера из меню курса, в режиме шагов — числа */
+    if (list) {
+      list.innerHTML = '';
+      lessons.forEach(function (l) {
+        var o = document.createElement('option');
+        o.value = l.label;
+        o.label = l.label + ' ' + l.title;
+        list.appendChild(o);
+      });
+    }
+    from.type = bySteps ? 'number' : 'text';
+    to.type = bySteps ? 'number' : 'text';
+    from.min = to.min = bySteps ? '1' : '';
+    from.placeholder = to.placeholder = bySteps ? '1' : '4.1';
 
     if (ctx && document.activeElement !== from && document.activeElement !== to) {
-      if (!from.value) from.value = ctx.step;
-      if (!to.value) to.value = total ? Math.min(total, ctx.step + 4) : ctx.step;
+      if (bySteps) {
+        if (!from.value || isNaN(parseInt(from.value, 10))) from.value = ctx.step;
+        if (!to.value || isNaN(parseInt(to.value, 10))) to.value = ctx.step;
+      } else {
+        var cur = lessons.filter(function (l) { return l.id === ctx.lesson; })[0];
+        var label = cur ? cur.label : (lessons[0] && lessons[0].label) || '';
+        if (!from.value || from.value.indexOf('.') < 0) from.value = label;
+        if (!to.value || to.value.indexOf('.') < 0) to.value = label;
+      }
     }
-    document.getElementById('sgx-total').textContent = total ? 'в уроке ' + total : '';
+
+    var total = document.getElementById('sgx-total');
+    if (total) {
+      total.textContent = bySteps
+        ? 'в уроке ' + ((stepIds[ctx && ctx.lesson] && stepIds[ctx.lesson].length) || '?') + ' шагов'
+        : 'в меню ' + lessons.length + ' уроков';
+    }
 
     var solving = !!job;
     document.getElementById('sgx-solve').disabled = solving;
@@ -1243,8 +1366,13 @@
     panel.id = 'sgx-panel';
     panel.innerHTML = [
       '<h4>Пройти задания</h4>',
-      '<div class="row">с шага <input type="number" id="sgx-from" min="1"> по',
-      ' <input type="number" id="sgx-to" min="1"> <span id="sgx-total"></span></div>',
+      '<div class="row"><select id="sgx-mode">',
+      '<option value="lessons">уроки курса (4.1 … 4.3)</option>',
+      '<option value="steps">шаги одного урока</option>',
+      '</select></div>',
+      '<div class="row">с <input id="sgx-from" list="sgx-lessons">',
+      'по <input id="sgx-to" list="sgx-lessons"><span id="sgx-total"></span></div>',
+      '<datalist id="sgx-lessons"></datalist>',
       '<div class="row"><button id="sgx-solve">Пройти: вставить и отправить</button></div>',
       '<div class="row"><button id="sgx-collect" class="sec">Собрать в Word со скринами</button></div>',
       '<div id="sgx-status"></div>',
@@ -1257,6 +1385,7 @@
       panel.classList.toggle('on');
       renderPanel();
     });
+    document.getElementById('sgx-mode').addEventListener('change', function () { renderPanel(); });
     document.getElementById('sgx-solve').addEventListener('click', function () { beginJob('solve'); });
     document.getElementById('sgx-collect').addEventListener('click', function () { beginJob('collect'); });
     document.getElementById('sgx-stop').addEventListener('click', function () { stopJob('остановлено'); });
@@ -1264,29 +1393,42 @@
     renderPanel();
   }
 
-  function range() {
-    var from = parseInt(document.getElementById('sgx-from').value, 10);
-    var to = parseInt(document.getElementById('sgx-to').value, 10);
-    if (!from || from < 1) throw new Error('укажи номер первого шага');
-    if (!to || to < from) throw new Error('последний шаг должен быть не меньше первого');
-    return { from: from, to: Math.min(to, from + 200) };
-  }
-
-  function beginJob(kind) {
+  async function beginJob(kind) {
     var ctx = stepContext();
     if (!ctx) { setStatus('открой урок: stepik.org/lesson/<урок>/step/<номер>'); return; }
-    var r;
-    try { r = range(); } catch (e) { setStatus(e.message); return; }
     if (kind === 'solve' && !cfg.token) { setStatus('нужен токен записи — меню → ⚙ Токен записи'); return; }
-    startJob(kind, ctx.lesson, r.from, r.to);
+
+    var from = document.getElementById('sgx-from').value;
+    var to = document.getElementById('sgx-to').value;
+    var plan = [], title = '';
+
+    try {
+      if (mode() === 'steps') {
+        var a = parseInt(from, 10), b = parseInt(to, 10);
+        if (!a || a < 1) throw new Error('укажи номер первого шага');
+        if (!b || b < a) throw new Error('последний шаг должен быть не меньше первого');
+        b = Math.min(b, a + 200);
+        plan = stepsPlan(ctx, a, b);
+        title = 'урок ' + ctx.lesson + ', шаги ' + a + '–' + b;
+      } else {
+        var lessons = lessonsInRange(from, to);
+        setStatus('собираю список заданий…');
+        plan = await lessonPlan(lessons);
+        title = 'уроки ' + lessons[0].label + '–' + lessons[lessons.length - 1].label;
+        if (!plan.length) throw new Error('не получил список шагов — открой любой урок этого курса и повтори');
+      }
+    } catch (e) {
+      setStatus(e.message);
+      return;
+    }
+    startJob(kind, plan, title);
   }
 
   async function redownload() {
     if (!job || !job.shots || !job.shots.length) { setStatus('скриншотов пока нет'); return; }
     try {
-      var blob = await buildDocx(job.shots, 'Задания Stepik · урок ' + job.lesson +
-        ', шаги ' + job.from + '–' + job.to);
-      downloadBlob(blob, 'stepik-задания-' + job.lesson + '-шаги-' + job.from + '-' + job.to + '.docx');
+      var blob = await buildDocx(job.shots, 'Задания Stepik · ' + (job.title || 'сборка'));
+      downloadBlob(blob, docName());
       setStatus('документ скачивается');
     } catch (e) { setStatus('не собрал документ: ' + e.message); }
   }
@@ -1562,7 +1704,7 @@
   function init() {
     injectBridge();
     ensurePanel();
-    if (job) setStatus('продолжаю: шаг ' + job.at + ' из ' + job.to);
+    if (job) setStatus('продолжаю: ' + (job.at + 1) + ' из ' + jobTotal());
 
     if (!cfg.token) {
       toast('⚠ Укажите токен записи: меню Tampermonkey → ⚙ Токен записи', true);

@@ -79,7 +79,12 @@ function makeFetch(state) {
 
     /* --- Stepik --- */
     if (u.includes('/api/lessons?ids')) {
-      return ok({ lessons: [{ id: LESSON, steps: state.emptyLessonSteps ? [] : STEP_IDS }] }, 'json');
+      const m = /ids\[\]=(\d+)/.exec(u);
+      const id = Number((m && m[1]) || LESSON);
+      const steps = id === LESSON
+        ? (state.emptyLessonSteps ? [] : STEP_IDS)
+        : [id * 10 + 1, id * 10 + 2];       /* у прочих уроков — по два шага */
+      return ok({ lessons: [{ id: id, steps: steps }] }, 'json');
     }
     if (u.includes('/api/users/me')) return ok({ users: [{ id: 42, full_name: 'Тестовый Студент' }] }, 'json');
     if (u.includes('/api/submissions')) {
@@ -182,6 +187,19 @@ const HTML = `<!doctype html><html><body>
 const JOB_HTML = `<!doctype html><html><body>
   <div class="attempt-wrapper"><div class="attempt-wrapper__content">
     <div class="step-text">Напишите программу, которая выводит число</div>
+    <div class="CodeMirror"><textarea></textarea></div>
+    <button class="submit">Отправить</button>
+  </div></div>
+</body></html>`;
+
+const SIDEBAR_HTML = `<!doctype html><html><body>
+  <div class="lesson-navigation">
+    <a href="/lesson/1755852">4.1 Знакомство с методами</a>
+    <a href="/lesson/1755853">4.2 Перегрузка и возвращаемое значение</a>
+    <a href="/lesson/1755854">4.3 Массивы и возврат значения</a>
+  </div>
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="step-text">Задание</div>
     <div class="CodeMirror"><textarea></textarea></div>
     <button class="submit">Отправить</button>
   </div></div>
@@ -360,11 +378,17 @@ const CHOICE_HTML = `<!doctype html><html><body>
       check('кнопка «от и до» есть', !!fab, fab && fab.textContent);
       check('панель есть', !!panel);
       check('есть поле «с шага»', !!win.document.querySelector('#sgx-from'));
+      check('есть выбор «уроки / шаги»', !!win.document.querySelector('#sgx-mode'));
+      check('режим по умолчанию — уроки', win.document.querySelector('#sgx-mode').value === 'lessons');
       check('есть кнопка «Пройти»', /Пройти/.test(win.document.querySelector('#sgx-solve').textContent));
       check('есть кнопка «Собрать в Word»', /Word/.test(win.document.querySelector('#sgx-collect').textContent));
       fab.click();
       check('панель открывается', panel.classList.contains('on'));
-      check('шаг подставился автоматически', win.document.querySelector('#sgx-from').value === '8',
+      /* по умолчанию режим «уроки», а в режиме шагов номер подставляется сам */
+      win.document.querySelector('#sgx-mode').value = 'steps';
+      win.document.querySelector('#sgx-mode').dispatchEvent(new win.Event('change'));
+      check('номер шага подставился автоматически',
+        win.document.querySelector('#sgx-from').value === '8',
         win.document.querySelector('#sgx-from').value);
     }
   });
@@ -387,7 +411,7 @@ const CHOICE_HTML = `<!doctype html><html><body>
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
     store: { l1793281_s8: { file: 'l1793281_s8.cs', ext: 'cs', kind: 'code', content: 'int x = 42;' } },
     submissions: [], html: JOB_HTML, waitMs: 6500,
-    job: { kind: 'solve', lesson: String(LESSON), from: 8, to: 8, at: 8, shots: [] },
+    job: { kind: 'solve', plan: [{ lesson: String(LESSON), step: 8, label: 'шаг 8' }], at: 0, shots: [], title: 'тест' },
     afterRun: async (win, st) => {
       check('ответ вставлен в редактор', st.setValue === 'int x = 42;', JSON.stringify(st.setValue));
       const btn = win.document.querySelector('button.submit');
@@ -402,7 +426,7 @@ const CHOICE_HTML = `<!doctype html><html><body>
   const docState = await run({
     url: `https://stepik.org/lesson/${LESSON}/step/9?unit=1818966`,
     store: {}, submissions: [], html: JOB_HTML, waitMs: 6500,
-    job: { kind: 'collect', lesson: String(LESSON), from: 9, to: 9, at: 9, shots: [] },
+    job: { kind: 'collect', plan: [{ lesson: String(LESSON), step: 9, label: 'шаг 9' }], at: 0, shots: [], title: 'тест' },
     afterRun: async (win, st) => {
       check('скриншот снят', st.shots === 1, st.shots);
       check('документ собран', !!st.docBlob, String(st.docBlob));
@@ -422,11 +446,57 @@ const CHOICE_HTML = `<!doctype html><html><body>
     check('в .docx есть картинка', names.some((n) => /^word\/media\/image\d+\.png$/.test(n)), names.join(', '));
     const doc = await zip.file('word/document.xml').async('string');
     check('в документе есть рисунок', /<w:drawing>/.test(doc) && /r:embed="rId1"/.test(doc));
-    check('в документе есть заголовок шага', /Шаг 9/.test(doc), doc.slice(0, 200));
+    check('в документе есть заголовок шага', /шаг 9/.test(doc), doc.slice(0, 200));
     const rels = await zip.file('word/_rels/document.xml.rels').async('string');
     check('связь с картинкой прописана', /Target="media\/image1\.png"/.test(rels), rels);
     check('размер файла разумный', buf.length > 500, buf.length + ' байт');
   }
+
+  console.log('\n=== 14. «с 4.1 по 4.3»: план из уроков курса ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: SIDEBAR_HTML, waitMs: 3000,
+    afterRun: async (win, st) => {
+      const opts = win.document.querySelectorAll('#sgx-lessons option');
+      check('уроки нашлись в меню курса', opts.length === 3, opts.length + ': ' +
+        Array.from(opts).map((o) => o.value).join(', '));
+      check('подсказки с номерами уроков', Array.from(opts).map((o) => o.value).join(',') === '4.1,4.2,4.3',
+        Array.from(opts).map((o) => o.value).join(','));
+
+      win.document.querySelector('#sgx-from').value = '4.1';
+      win.document.querySelector('#sgx-to').value = '4.3';
+      win.document.querySelector('#sgx-solve').click();
+      await new Promise((r) => setTimeout(r, 1200));
+
+      const job = JSON.parse(st.storage.job || 'null');
+      check('задание создано', !!job, st.storage.job);
+      check('в плане 6 заданий (по 2 шага × 3 урока)', job && job.plan.length === 6,
+        job && job.plan.length);
+      check('план начинается с 4.1.1', job && job.plan[0].label === '4.1.1', job && job.plan[0].label);
+      check('план кончается 4.3.2', job && job.plan[5].label === '4.3.2', job && job.plan[5].label);
+      check('уроки в плане разные', job && new Set(job.plan.map((p) => p.lesson)).size === 3);
+      check('подпись задания про уроки', job && /уроки 4\.1–4\.3/.test(job.title), job && job.title);
+    }
+  });
+
+  console.log('\n=== 15. диапазон по шагам одного урока ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: SIDEBAR_HTML, waitMs: 3000,
+    afterRun: async (win, st) => {
+      win.document.querySelector('#sgx-mode').value = 'steps';
+      win.document.querySelector('#sgx-mode').dispatchEvent(new win.Event('change'));
+      win.document.querySelector('#sgx-from').value = '2';
+      win.document.querySelector('#sgx-to').value = '4';
+      win.document.querySelector('#sgx-collect').click();
+      await new Promise((r) => setTimeout(r, 800));
+
+      const job = JSON.parse(st.storage.job || 'null');
+      check('план из трёх шагов', job && job.plan.length === 3, job && job.plan.length);
+      check('все шаги текущего урока', job && job.plan.every((p) => p.lesson === String(LESSON)));
+      check('первый шаг — 2', job && job.plan[0].step === 2, job && job.plan[0].step);
+    }
+  });
 
   const failed = results.filter((r) => !r.ok);
   console.log('\n=== ИТОГ: ' + (results.length - failed.length) + '/' + results.length + ' проверок пройдено ===');
