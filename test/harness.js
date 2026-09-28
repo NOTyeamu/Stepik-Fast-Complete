@@ -77,6 +77,18 @@ function makeFetch(state) {
     /* --- проверка токена в отчёте --- */
     if (u === `https://api.github.com/repos/${REPO}`) return state.storeDown ? fail(500) : ok({}, 'json');
 
+    /* --- ИИ (Pollinations): ключа нет, поэтому просто отвечаем как сервис --- */
+    if (u.includes('text.pollinations.ai')) {
+      state.aiCalls.push({ url: u, body: init && init.body });
+      if (state.aiDown) return fail(503);
+      let asked = '';
+      try { asked = JSON.parse(init.body).messages.slice(-1)[0].content; } catch (e) { asked = ''; }
+      return ok({
+        choices: [{ message: { role: 'assistant', content: state.aiText || 'Console.WriteLine(5);' } }],
+        model: 'gpt-oss-20b', user_tier: 'anonymous', __asked: asked
+      }, 'json');
+    }
+
     /* --- Stepik --- */
     if (u.includes('/api/lessons?ids')) {
       const m = /ids\[\]=(\d+)/.exec(u);
@@ -98,7 +110,7 @@ function makeFetch(state) {
   };
 }
 
-function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun }) {
+function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiText, aiDown }) {
   return new Promise((resolve, reject) => {
     const dom = new JSDOM(html, { url, runScripts: 'dangerously', pretendToBeVisual: true });
     const { window } = dom;
@@ -107,6 +119,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       store: Object.assign({}, store || {}), submissions: submissions || [],
       storeDown: !!storeDown, emptyLessonSteps: !!emptyLessonSteps,
       setValue: null, submitted: 0, retried: 0, docBlob: null, shots: 0,
+      aiCalls: [], aiText: aiText, aiDown: !!aiDown,
       storage: { writeToken: token === undefined ? 'github_pat_11TEST' : token }
     };
     if (job) state.storage.job = JSON.stringify(job);
@@ -163,7 +176,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
     const fn = new Function(
       'window', 'document', 'location', 'fetch', 'console', 'navigator',
       'GM_getValue', 'GM_setValue', 'GM_addStyle', 'GM_registerMenuCommand',
-      'CustomEvent', 'Event', 'KeyboardEvent', 'MouseEvent',
+      'CustomEvent', 'Event', 'KeyboardEvent', 'MouseEvent', 'PopStateEvent',
       'HTMLTextAreaElement', 'HTMLInputElement', 'TextEncoder', 'btoa',
       'html2canvas', 'JSZip', 'URL',
       'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
@@ -176,7 +189,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       (k, d) => (k in state.storage ? state.storage[k] : d),
       (k, v) => { state.storage[k] = v; },
       () => {}, (name, fn) => { state.menu[name] = fn; },
-      window.CustomEvent, window.Event, window.KeyboardEvent, window.MouseEvent,
+      window.CustomEvent, window.Event, window.KeyboardEvent, window.MouseEvent, window.PopStateEvent,
       window.HTMLTextAreaElement, window.HTMLInputElement, TextEncoder, btoa,
       window.html2canvas, JSZip, window.URL,
       (f, ms) => { const t = setTimeout(f, ms); timers.push(t); return t; },
@@ -249,6 +262,15 @@ const CHOICE_HTML = `<!doctype html><html><body>
       <label><input type="radio" value="333"> третий</label>
     </div>
   </div></div></body></html>`;
+
+/* страница задания, где ответа в папке нет — сюда придёт ИИ */
+const AI_HTML = `<!doctype html><html><body>
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="step-text">Напишите на C# программу, которая считает сумму 2 и 3</div>
+    <div class="CodeMirror"><textarea></textarea></div>
+    <button class="attempt-wrapper-button submit" type="button">Отправить на проверку</button>
+  </div></div>
+</body></html>`;
 
 (async () => {
   console.log('\n=== 1. автосохранение зачтённого шага ===');
@@ -605,6 +627,210 @@ const CHOICE_HTML = `<!doctype html><html><body>
         win.document.querySelector('#sgx-status').textContent) ||
         /готово/.test(win.document.querySelector('#sgx-status').textContent),
         win.document.querySelector('#sgx-status').textContent);
+    }
+  });
+
+  console.log('\n=== 20. «собрать в Word» с клика по панели: переход и отсутствие залипания ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {
+      l1755852_s1: { file: 'l1755852_s1.cs', ext: 'cs', kind: 'code', content: 'a' },
+      l1755852_s2: { file: 'l1755852_s2.cs', ext: 'cs', kind: 'code', content: 'b' },
+      l1755853_s1: { file: 'l1755853_s1.cs', ext: 'cs', kind: 'code', content: 'c' }
+    },
+    submissions: [], html: SIDEBAR_HTML, waitMs: 6000,
+    afterRun: async (win, st) => {
+      /* ровно то, что делает человек: открыл панель из меню и нажал кнопку */
+      st.menu['📄 Пройти задания / собрать в Word']();
+      await new Promise((r) => setTimeout(r, 900));      /* список уроков подтягивается */
+      win.document.querySelector('#sgx-from-l').value = '4.1';
+      win.document.querySelector('#sgx-to-l').value = '4.2';
+      win.document.querySelector('#sgx-collect').click();
+      await new Promise((r) => setTimeout(r, 1500));
+
+      const job1 = JSON.parse(st.storage.job || 'null');
+      check('обход создан', !!job1, st.storage.job);
+      check('в плане только задания с кодом из ответов, а не все подряд',
+        job1 && job1.plan.length === 3, job1 && job1.plan.length); /* 3 ответа с кодом */
+      check('в статусе видно попытку перехода',
+        /перехожу|собираю|скриншот/.test(win.document.querySelector('#sgx-status').textContent),
+        win.document.querySelector('#sgx-status').textContent);
+      check('полоска прогресса на странице показана',
+        !!win.document.querySelector('#sgx-progress'));
+    }
+  });
+
+  console.log('\n=== 20a. в диапазоне есть урок без ответов → берём только уроки с ответами ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {
+      l1755852_s1: { file: 'l1755852_s1.cs', ext: 'cs', kind: 'code', content: 'a' }
+    },
+    submissions: [], html: SIDEBAR_HTML, waitMs: 5000,
+    afterRun: async (win, st) => {
+      st.menu['📄 Пройти задания / собрать в Word']();
+      await new Promise((r) => setTimeout(r, 900));
+      /* в списке есть только уроки с ответами, поэтому курса целиком не выбрать */
+      const opts = Array.from(win.document.querySelector('#sgx-from-l').options).map((o) => o.value);
+      win.document.querySelector('#sgx-from-l').value = opts[0];
+      win.document.querySelector('#sgx-to-l').value = opts[opts.length - 1];
+      /* перехватываем план в момент его создания, до старта перехода */
+      let plan = null;
+      win.document.addEventListener('sgx:nav', () => {
+        const j = JSON.parse(st.storage.job || 'null');
+        if (j && !plan) plan = j.plan;
+      });
+      win.document.querySelector('#sgx-collect').click();
+      await new Promise((r) => setTimeout(r, 1200));
+      check('в план попали только уроки с ответами',
+        plan && plan.every((p) => p.lesson === '1755852'), JSON.stringify(plan));
+      check('в плане только шаги с сохранённым кодом (у 4.1 он один)',
+        plan && plan.length === 1, plan && plan.length);
+    }
+  });
+
+  console.log('\n=== 21. первый шаг плана не совпадает с текущим → скрипт сам переходит ===');
+  await run({
+    /* стоим на 8-м шаге, а план начинается с 1-го */
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: JOB_HTML, waitMs: 12000,
+    job: { kind: 'collect', plan: [{ lesson: String(LESSON), step: 1, label: 'шаг 1' }], at: 0, shots: [], title: 'тест', navTo: '', navAt: 0, navHard: false },
+    afterRun: async (win, st) => {
+      /* это и было поломкой: скрипт не переходил сам и «сборка в Word» ничего не делала */
+      check('скрипт сам сменил адрес на шаг из плана',
+        win.location.pathname === `/lesson/${LESSON}/step/1`, win.location.pathname);
+      check('обход не остался висеть',
+        JSON.parse(st.storage.job || 'null') === null, st.storage.job);
+      const status = win.document.querySelector('#sgx-status').textContent;
+      check('статус говорит про готовый документ', /готово|документ/.test(status), status);
+    }
+  });
+
+  console.log('\n=== 22. переход зафиксирован (роутер), а не молча проигнорирован ===');
+  const navState = await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: { l1755852_s1: { file: 'l1755852_s1.cs', ext: 'cs', kind: 'code', content: 'a' } },
+    submissions: [], html: SIDEBAR_HTML, waitMs: 2600,
+    /* задание уже есть: при первом тике скрипт обязан пойти на первый шаг */
+    job: { kind: 'collect', plan: [{ lesson: '1755852', step: 1, label: '4.1.1' }], at: 0, shots: [], title: 'тест', navTo: '', navAt: 0, navHard: false },
+    afterRun: async (win, st) => {
+      /* переход уже случился к моменту послеRun: проверяем по адресу документа */
+      check('адрес сменился на нужный шаг',
+        win.location.pathname === '/lesson/1755852/step/1', win.location.pathname + win.location.search);
+      check('другой урок — без чужого ?unit=', !/unit=/.test(win.location.search), win.location.search);
+      /* и в отчёте самопроверки переход тоже виден */
+      st.menu['🧪 Проверка хранилища (отчёт)']();
+      await new Promise((r) => setTimeout(r, 1200));
+      const ta = win.document.querySelector('#sgx-report textarea');
+      check('переход виден в отчёте', ta && /\/lesson\/1755852\/step\/1/.test(ta.value),
+        ta && (ta.value.match(/последний переход: .*/) || [''])[0]);
+    }
+  });
+
+  console.log('\n=== 23. обход не запускается повторно, пока идёт ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: { l1793281_s8: { file: 'l1793281_s8.cs', ext: 'cs', kind: 'code', content: 'int x = 1;' } },
+    submissions: [], html: SIDEBAR_HTML, waitMs: 1200,
+    /* шаг в плане недостижим → обход гарантированно ещё идёт */
+    job: {
+      kind: 'solve', at: 0, shots: [], title: 'тест',
+      plan: [{ lesson: '9999999', step: 1, label: 'чужой.1' }],
+      navTo: '', navAt: 0, navHard: false
+    },
+    afterRun: async (win, st) => {
+      const before = JSON.parse(st.storage.job || 'null');
+      check('обход на месте перед проверкой', !!before, st.storage.job);
+      check('кнопка «Собрать в Word» заблокирована, пока идёт обход',
+        win.document.querySelector('#sgx-collect').disabled === true,
+        'disabled=' + win.document.querySelector('#sgx-collect').disabled);
+
+      /* кнопки во время обхода заблокированы — второй обход физически не запустить */
+      st.menu['📄 Пройти задания / собрать в Word']();
+      win.document.querySelector('#sgx-collect').click();
+      win.document.querySelector('#sgx-solve').click();
+      await new Promise((r) => setTimeout(r, 100));
+      const after = JSON.parse(st.storage.job || 'null');
+      check('обход всё ещё тот же самый',
+        after && after.plan[0].label === 'чужой.1', st.storage.job);
+      check('«Пройти и отправить» тоже заблокирована во время обхода',
+        win.document.querySelector('#sgx-solve').disabled === true);
+      check('«Остановить» доступна', win.document.querySelector('#sgx-stop').disabled === false);
+    }
+  });
+
+  console.log('\n=== 24. ИИ: решение приходит и показывается, ничего не отправляя ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 3000,
+    aiText: 'using System;\nclass P { static void Main() { Console.WriteLine(5); } }',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 1500));
+
+      check('запрос к бесплатному ИИ ушёл', st.aiCalls.length === 1, 'запросов: ' + st.aiCalls.length);
+      const body = st.aiCalls[0] && JSON.parse(st.aiCalls[0].body);
+      check('модель указана явно', body && body.model === 'openai-fast', body && body.model);
+      check('в запросе нет никакого ключа',
+        !/github_pat|Bearer|api[_-]?key/i.test(st.aiCalls[0].body), 'тело запроса чистое');
+      const asked = st.aiCalls[0] && JSON.parse(st.aiCalls[0].body).messages.slice(-1)[0].content;
+      check('в запрос попал текст задания', /сумму 2 и 3/.test(asked), asked && asked.slice(0, 80));
+
+      const box = win.document.querySelector('#sgx-ai');
+      check('окно с решением открылось', !!box);
+      const text = box && box.querySelector('.sgx-ai-text').value;
+      check('в окне именно ответ ИИ', /Console\.WriteLine\(5\)/.test(text || ''), text);
+      check('в окне нет другого ответа/склейки',
+        (text || '').trim() === 'using System;\nclass P { static void Main() { Console.WriteLine(5); } }', text);
+
+      check('ничего не вставлено в редактор', st.setValue === null, JSON.stringify(st.setValue));
+      check('ничего не отправлено', st.submitted === 0, 'кликов: ' + st.submitted);
+      check('в очереди ответов пусто', Object.keys(st.inbox).length === 0);
+    }
+  });
+
+  console.log('\n=== 25. ИИ недоступен → сказано внятно, ничего не сломано ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 3000, aiDown: true,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 1500));
+      const status = win.document.querySelector('#sgx-status').textContent;
+      check('сказано, что ИИ не ответил', /ИИ не ответил/.test(status), status);
+      check('окно с решением не открылось', !win.document.querySelector('#sgx-ai'));
+      check('редактор не тронут', st.setValue === null);
+    }
+  });
+
+  console.log('\n=== 26. лимит бесплатного ИИ соблюдается (1 запрос / 15 с) ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 3000,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 1200));
+      st.menu['✨ ИИ: решить текущий шаг']();      /* сразу второй раз */
+      await new Promise((r) => setTimeout(r, 600));
+      check('второй запрос не ушёл — сработал лимит', st.aiCalls.length === 1,
+        'запросов: ' + st.aiCalls.length);
+      const status = win.document.querySelector('#sgx-status').textContent;
+      check('сказано, сколько подождать', /подожди \d+ с|лимит/.test(status), status);
+    }
+  });
+
+  console.log('\n=== 27. ИИ не трогает шаги, где ответ уже есть ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: { l1793281_s8: { file: 'l1793281_s8.cs', ext: 'cs', kind: 'code', content: 'int x = 1;' } },
+    submissions: [], html: AI_HTML, waitMs: 2200,
+    afterRun: async (win, st) => {
+      const chip = win.document.querySelector('#sgx-chip');
+      check('скоба показывает сохранённое решение',
+        chip && chip.querySelector('.sgx-label').textContent === 'есть решение');
+      check('кнопка ИИ в скобе спрятана (ответ уже есть)',
+        chip && !chip.classList.contains('sgx-no-answer'), chip && chip.className);
+      check('к ИИ не обращались', st.aiCalls.length === 0);
     }
   });
 

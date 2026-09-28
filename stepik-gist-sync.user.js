@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      5.3.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет».
+// @version      6.0.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Панель из меню Tampermonkey умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ — бесплатно и без ключа.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
 // @connect      raw.githubusercontent.com
 // @connect      api.github.com
+// @connect      text.pollinations.ai
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_addStyle
@@ -51,7 +52,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '5.3.0';
+  var VERSION = '6.0.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -680,6 +681,11 @@
     '#sgx-chip .sgx-act:hover{background:#2769C4}',
     '#sgx-chip .sgx-act.no{background:#EEF1F5;color:#3B3936}',
     '#sgx-chip .sgx-act.no:hover{background:#E1E7EE}',
+    '#sgx-chip .sgx-act.ai{background:#EEF2FF;color:#3730A3}',
+    '#sgx-chip .sgx-act.ai:hover{background:#E0E7FF}',
+    /* «ИИ» в скобе показываем только когда сохранённого ответа нет */
+    '#sgx-chip .sgx-ai-only{display:none}',
+    '#sgx-chip.sgx-no-answer .sgx-ai-only{display:inline}',
     /* --- вспышка вокруг редактора и тост --- */
     '.sgx-flash{position:fixed;z-index:2147482000;pointer-events:none;border-radius:6px;opacity:1;',
     'background:rgba(56,178,113,.28);box-shadow:inset 0 0 0 2px rgba(56,178,113,.5);transition:opacity .4s ease}',
@@ -738,6 +744,28 @@
     '#sgx-panel .sgx-bar{height:100%;width:0;border-radius:0 2px 2px 0;',
     'background:linear-gradient(90deg,#2563EB,#60A5FA);transition:width .35s ease}',
     '#sgx-panel .sgx-status{padding:10px 14px 13px;font-size:12.5px;color:#475569;min-height:36px}',
+    '#sgx-panel .sgx-btn.ai{background:#EEF2FF;color:#3730A3}',
+    '#sgx-panel .sgx-btn.ai:hover{background:#E0E7FF}',
+    /* окно с решением ИИ */
+    '#sgx-ai{position:fixed;right:20px;bottom:20px;z-index:2147483200;width:420px;',
+    'max-width:calc(100vw - 32px);max-height:70vh;display:flex;flex-direction:column;overflow:hidden;',
+    'border-radius:14px;background:#FFFFFF;border:1px solid rgba(15,23,42,.08);',
+    'box-shadow:0 16px 40px rgba(15,23,42,.22),0 2px 8px rgba(15,23,42,.06);',
+    'font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#0F172A}',
+    '#sgx-ai *{box-sizing:border-box}',
+    '#sgx-ai .sgx-ai-head{display:flex;align-items:center;justify-content:space-between;',
+    'padding:12px 14px;border-bottom:1px solid #F1F5F9;font-size:14px;font-weight:700}',
+    '#sgx-ai .sgx-ai-x{display:flex;align-items:center;justify-content:center;width:26px;height:26px;',
+    'border:0;border-radius:8px;background:#F1F5F9;color:#64748B;cursor:pointer;padding:0}',
+    '#sgx-ai .sgx-ai-x:hover{background:#E2E8F0;color:#0F172A}',
+    '#sgx-ai .sgx-ai-text{flex:1 1 auto;min-height:180px;margin:0;padding:12px 14px;border:0;resize:vertical;',
+    'background:#F8FAFC;color:#0F172A;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}',
+    '#sgx-ai .sgx-ai-text:focus{outline:none;background:#F1F5F9}',
+    '#sgx-ai .sgx-ai-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px}',
+    '#sgx-ai .sgx-ai-note{font-size:11.5px;color:#94A3B8}',
+    '#sgx-ai .sgx-ai-copy{display:flex;align-items:center;gap:7px;height:34px;padding:0 13px;border:0;',
+    'border-radius:9px;background:#2563EB;color:#fff;font-size:13px;font-weight:700;cursor:pointer}',
+    '#sgx-ai .sgx-ai-copy:hover{filter:brightness(1.07)}',
     /* тонкая полоска сверху страницы — как встроенный индикатор сайта */
     '#sgx-progress{position:fixed;top:0;left:0;right:0;height:3px;z-index:2147483600;pointer-events:none}',
     '#sgx-progress>div{height:100%;width:0;background:#2563EB;opacity:.85;transition:width .35s ease}',
@@ -776,6 +804,8 @@
       '<button type="button" class="sgx-act yes">вставить</button>',
       '<span class="sgx-sep">/</span>',
       '<button type="button" class="sgx-act no">нет</button>',
+      '<span class="sgx-sep sgx-ai-only">/</span>',
+      '<button type="button" class="sgx-act ai sgx-ai-only">ИИ</button>',
       '</span>',
       '</div>'
     ].join('');
@@ -788,6 +818,7 @@
       insertSaved(ctx).catch(function (err) { toast('⚠ ' + err.message, true); });
     });
     chip.querySelector('.no').addEventListener('click', function () { hideChip(true); });
+    chip.querySelector('.sgx-act.ai').addEventListener('click', function () { askAi(); });
     return chip;
   }
 
@@ -829,9 +860,10 @@
     chip.style.top = Math.round(r.top) + 'px';
   }
 
-  function showChip(target, label) {
+  function showChip(target, label, noAnswer) {
     ensureChip();
     chip.querySelector('.sgx-label').textContent = label || 'есть решение';
+    chip.classList.toggle('sgx-no-answer', !!noAnswer);
     chipAnchor = target;
     chip.classList.add('on');
     positionChip(target);
@@ -933,6 +965,18 @@
   var lastDocUrl = '';
   var lastNav = '';
 
+  /* сколько ждём открытия шага, прежде чем признать переход неудачным.
+     Не больше 6 секунд: на диапазон из десятков шагов минуты ожидания недопустимы. */
+  var NAV_TIMEOUT = 6000;
+  var NAV_HARD_AFTER = 2000;
+
+  /* Одностраничное приложение может сменить адрес, не перезагрузив документ.
+     Тогда job в GM-хранилище живёт в СТАРОЙ вкладке: доводим её до конца,
+     обнуляя шаг, чтобы после перезагрузки обход не начался заново. */
+  function forkedJob() {
+    try { return JSON.parse(GM_getValue(JOB_KEY, 'null')); } catch (e) { return null; }
+  }
+
   function saveJob() {
     try { GM_setValue(JOB_KEY, JSON.stringify(job)); } catch (e) { log('не сохранил задание:', e.message); }
   }
@@ -946,7 +990,11 @@ var ICONS = {
     refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>' +
       '<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
     stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
-    close: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'
+    close: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+    spark: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>' +
+      '<path d="M18.5 15.5l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z"/>',
+    copy: '<rect x="9" y="9" width="11" height="11" rx="2"/>' +
+      '<path d="M5 15V5a2 2 0 0 1 2-2h8"/>'
   };
 
   function icon(name, size) {
@@ -955,7 +1003,14 @@ var ICONS = {
       ' aria-hidden="true">' + (ICONS[name] || '') + '</svg>';
   }
 
+  /* Сообщение, которое не должен перебить идущий обход: короткие подсказки вроде
+     «обход уже идёт» иначе исчезают через долю секунды, и человек их не видит. */
+  var stickyUntil = 0, stickyText = '';
+  function setSticky(text) { stickyText = text; stickyUntil = Date.now() + 2500; setStatus(text); }
+
   function setStatus(text) {
+    if (Date.now() < stickyUntil && text !== stickyText) return;
+    stickyText = text;
     var el = document.getElementById('sgx-status');
     if (el) el.textContent = text || '';
     var total = jobTotal();
@@ -982,41 +1037,93 @@ var ICONS = {
   }
 
   function startJob(kind, plan, title) {
-    job = { kind: kind, plan: plan, at: 0, shots: [], title: title };
+    job = { kind: kind, plan: plan, at: 0, shots: [], title: title, navAt: 0, navTo: '' };
     saveJob();
     renderPanel();
     setStatus(kind === 'solve' ? 'пошёл по заданиям' : 'собираю скриншоты');
+    /* обход обязан быть виден: полоска вверху страницы + статус в панели */
+    setSiteProgress(0);
     setTimeout(tick, 0);
   }
 
   function stopJob(message) {
     job = null;
     saveJob();
-    renderPanel();
+    setSiteProgress(-1);
+    renderPanel(true);
     setStatus(message || 'остановлено');
+  }
+
+  /* Stepik — одностраничное приложение: смена location.href внутри истории иногда
+     перехватывается роутером и страница НЕ перезагружается. Тогда обход стоит на
+     месте, а код считает, что «перешёл». Поэтому адресуем маршрутизатор напрямую,
+     а присваивание href оставляем запасным путём. */
+  function pushRoute(url) {
+    try {
+      window.history.pushState({}, '', url);
+      document.dispatchEvent(new CustomEvent('sgx:nav', { detail: { url: url } }));
+      try { window.dispatchEvent(new PopStateEvent('popstate')); } catch (e2) { /* не во всех движках */ }
+      return true;
+    } catch (e) { return false; }
   }
 
   /* ?unit= из адреса относится к ТЕКУЩЕМУ уроку: с чужим unit Stepik отдаёт
      «страница не найдена». Поэтому переносим его только внутри того же урока. */
-  function goToStep(lesson, step) {
+  function stepUrl(lesson, step) {
     var ctx = stepContext();
     var same = !!(ctx && String(ctx.lesson) === String(lesson));
-    var url = '/lesson/' + lesson + '/step/' + step + (same ? (location.search || '') : '');
-    lastNav = url;
-    if (same && ctx.step === step) return;
-    try { location.href = url; } catch (e) { log('перейти не удалось:', e.message); }
+    return '/lesson/' + lesson + '/step/' + step + (same ? (location.search || '') : '');
   }
 
+  function goToStep(lesson, step) {
+    var ctx = stepContext();
+    if (ctx && String(ctx.lesson) === String(lesson) && ctx.step === +step) return true;
+    var url = stepUrl(lesson, step);
+    lastNav = url;
+    lastReason = 'перехожу на ' + url;
+    return pushRoute(url);
+  }
+
+  /* мы уже на нужном шаге карточки задания */
   async function runJob(ctx) {
     if (!job || jobBusy) return;
     var target = job.plan && job.plan[job.at];
     if (!target) return finishJob();
 
     if (String(ctx.lesson) !== String(target.lesson) || ctx.step !== target.step) {
+      var url = stepUrl(target.lesson, target.step);
+      setStatus('перехожу на ' + target.label + '…');
+
+      /* уже просили этот же переход — значит роутер не сработал */
+      if (job.navTo === url) {
+        if (!job.navAt) job.navAt = Date.now();
+        var waited = Date.now() - job.navAt;
+
+        /* прошло достаточно — пробуем жёсткую перезагрузку мимо роутера */
+        if (waited > NAV_HARD_AFTER && !job.navHard) {
+          job.navHard = true;
+          lastReason = 'жёсткий переход на ' + url;
+          var went = false;
+          try { location.href = url; went = true; } catch (e) { went = false; }
+          if (went) return;
+        }
+        /* страницу открыть не удалось — не висим, идём дальше */
+        if (waited > NAV_TIMEOUT) {
+          setStatus('не смог открыть ' + target.label + ' — пропускаю');
+          return nextJobStep(true);
+        }
+        return;
+      }
+
+      job.navTo = url;
+      job.navAt = 0;
+      job.navHard = false;
       goToStep(target.lesson, target.step);
       return;
     }
 
+    job.navTo = '';
+    job.navAt = 0;
     jobBusy = true;
     try {
       if (job.kind === 'solve') await jobSolve(ctx, target);
@@ -1024,25 +1131,35 @@ var ICONS = {
     } catch (e) {
       setStatus('ошибка на ' + target.label + ': ' + e.message);
       await sleep(1500);
-      nextJobStep();
+      nextJobStep(true);
     } finally {
       jobBusy = false;
     }
   }
 
-  function nextJobStep() {
+  function nextJobStep(skipped) {
     if (!job) return;
+    if (skipped) job.skipped = (job.skipped || 0) + 1;
     job.at++;
+    job.navTo = '';
+    job.navAt = 0;
+    job.navHard = false;
     saveJob();
     var target = job.plan && job.plan[job.at];
     if (!target) return finishJob();
-    goToStep(target.lesson, target.step);
+    setStatus('перехожу на ' + target.label + '…');
+    return goToStep(target.lesson, target.step);
+  }
+
+  function skippedNote() {
+    return job && job.skipped ? ' · пропущено ' + job.skipped : '';
   }
 
   function finishJob() {
     if (!job) return;
     if (job.kind === 'collect') return finishCollect();
-    stopJob('готово: прошёл ' + jobTotal() + ' заданий');
+    stopJob('готово: пройдено ' + (jobTotal() - (job.skipped || 0)) + ' из ' + jobTotal() +
+      skippedNote());
   }
 
   /* Текст кнопки на Stepik — «Отправить на проверку», поэтому сверяем НАЧАЛО строки,
@@ -1073,7 +1190,7 @@ var ICONS = {
     } catch (e) {
       setStatus(target.label + ': ' + e.message + ' — пропускаю');
       await sleep(900);
-      return nextJobStep();
+      return nextJobStep(true);
     }
     await sleep(500);
     /* если Stepik считает редактор пустым, кнопка остаётся серой — толкаем её событиями */
@@ -1089,7 +1206,7 @@ var ICONS = {
         ? ': кнопка «' + norm(stuck.textContent) + '» неактивна — ответ вставил, но не отправил'
         : ': кнопки «Отправить» нет — пропускаю'));
       await sleep(1500);
-      return nextJobStep();
+      return nextJobStep(true);
     }
     btn.click();
     setStatus((job.at + 1) + ' из ' + jobTotal() + ': ' + target.label + ' отправлено');
@@ -1101,7 +1218,7 @@ async function jobCollect(ctx, target) {
     /* скриншотим только там, где вставляют код, а не отвечают галочкой */
     if (!$('.CodeMirror, .cm-content, .attempt-wrapper__plugin textarea')) {
       setStatus((job.at + 1) + ' из ' + jobTotal() + ': ' + target.label + ' — не код, пропускаю');
-      return nextJobStep();
+      return nextJobStep(true);
     }
     setStatus((job.at + 1) + ' из ' + jobTotal() + ': ' + target.label + ' — снимаю скриншот');
     var shot = await shootStep(ctx, target);
@@ -1111,6 +1228,7 @@ async function jobCollect(ctx, target) {
     } else {
       setStatus(target.label + ': скриншот не получился — пропускаю');
       await sleep(1000);
+      return nextJobStep(true);
     }
     return nextJobStep();
   }
@@ -1302,12 +1420,160 @@ async function jobCollect(ctx, target) {
     try {
       var blob = await buildDocx(shots, title);
       var name = docName();
-      stopJob('готово: ' + shots.length + ' скриншотов, документ скачивается');
+      stopJob('готово: ' + shots.length + ' скриншотов, документ скачивается' + skippedNote());
       downloadBlob(blob, name);
       renderPanel(true);
     } catch (e) {
       stopJob('не собрал документ: ' + e.message);
     }
+  }
+
+  /* ------------------------------------------------------------------- ИИ */
+
+  /* ИИ советует решение там, где в общей папке ответа ещё нет.
+     Ключа нет вовсе: обращаемся к бесплатному text.pollinations.ai, который
+     пускает анонимно (1 запрос в 15 с). Значит и воровать нечего, и лимит
+     не «утечёт»: он общий и восстановится сам через 15 секунд.
+     ИИ ничего не вставляет и не отправляет — только показывает текст решения,
+     чтобы человек сам решил, пользоваться им или нет. */
+
+  var AI_URL = 'https://text.pollinations.ai/openai';
+  var AI_MODEL = 'openai-fast';
+  var AI_GAP = 16000;                  /* анонимный лимит: 1 запрос / 15 с */
+  var aiBusy = false;
+  var aiLast = 0;
+  var aiAnswer = null;                 /* { key, text, at, model } */
+  var AI_KEY = 'aiAnswer';
+
+  try { aiAnswer = JSON.parse(GM_getValue(AI_KEY, 'null')); } catch (e) { aiAnswer = null; }
+
+  function saveAi() {
+    try { GM_setValue(AI_KEY, JSON.stringify(aiAnswer)); } catch (e) { /* ignore */ }
+  }
+
+  function aiWaitLeft() {
+    var left = AI_GAP - (Date.now() - aiLast);
+    return left > 0 ? Math.ceil(left / 1000) : 0;
+  }
+
+  /* текст задания с карточки: условие + код, если он в условии */
+  function stepPrompt() {
+    var card = $('.attempt-wrapper__content') || $('.step-text') || document.body;
+    var text = norm(card.textContent || '');
+    text = text.replace(/Отправить на проверку|Решить снова|Скачать|Показать ответ/g, ' ');
+    return text.slice(0, 2500);
+  }
+
+  function stepLanguage() {
+    var cm = $('.CodeMirror');
+    if (cm && cm.CodeMirror && cm.CodeMirror.getOption) {
+      try { return cm.CodeMirror.getOption('mode') || ''; } catch (e) { /* ignore */ }
+    }
+    var hint = norm((document.body.textContent || '').slice(0, 4000));
+    var langs = [['c#', 'C#'], ['csharp', 'C#'], ['python', 'Python'], ['питон', 'Python'],
+      ['java', 'Java'], ['c++', 'C++'], ['javascript', 'JavaScript'], ['sql', 'SQL'],
+      ['kotlin', 'Kotlin'], ['go', 'Go'], ['haskell', 'Haskell'], ['pascal', 'Pascal']];
+    var low = hint.toLowerCase();
+    for (var i = 0; i < langs.length; i++) {
+      if (low.indexOf(langs[i][0]) >= 0) return langs[i][1];
+    }
+    return '';
+  }
+
+  /* Задание бывает и «ответить галочкой»: тогда просим прислать вариант текстом. */
+  function stepKindNow() {
+    if ($('.CodeMirror, .cm-content, .attempt-wrapper__plugin textarea')) return 'code';
+    if ($('.quiz-component input[type="radio"], .quiz-component input[type="checkbox"]')) return 'choice';
+    return 'text';
+  }
+
+  async function askAi() {
+    var ctx = stepContext();
+    if (!ctx) { setStatus('ИИ: открой страницу задания'); return; }
+    if (aiBusy) { setStatus('ИИ: уже думает…'); return; }
+    var wait = aiWaitLeft();
+    if (wait) { setStatus('ИИ: бесплатный лимит, подожди ' + wait + ' с'); return; }
+
+    var task = stepPrompt();
+    if (task.length < 20) { setStatus('ИИ: не вижу текста задания на странице'); return; }
+
+    var kind = stepKindNow();
+    var lang = stepLanguage();
+    var ask = kind === 'choice'
+      ? 'Задание — тест с выбором. Пришли номер правильного варианта и его текст, коротко.'
+      : (lang ? 'Пиши на ' + lang + '.' : 'Определи язык по условию и пиши на нём.');
+
+    aiBusy = true;
+    setStatus('ИИ думает над шагом ' + ctx.step + '…');
+    setSiteProgress(0.5);
+    try {
+      var res = await fetch(AI_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: AI_MODEL,
+          messages: [
+            {
+              role: 'system',
+              content: 'Ты помощник по программированию. Реши задание с платформы Stepik. ' +
+                'Ответь коротко: только решение, без пояснений и без markdown-разметки. ' +
+                'Если это код — дай готовый код целиком.'
+            },
+            { role: 'user', content: ask + '\n\nУсловие:\n' + task }
+          ],
+          max_tokens: 1200,
+          private: true
+        })
+      });
+      if (!res.ok) throw new Error('сервис ответил HTTP ' + res.status);
+      var data = await res.json();
+      var text = ((data.choices && data.choices[0] && data.choices[0].message &&
+        data.choices[0].message.content) || '').trim();
+      if (!text) throw new Error('пустой ответ');
+      aiLast = Date.now();
+      aiAnswer = { key: ctx.key, text: text, at: Date.now(), model: AI_MODEL, kind: kind };
+      saveAi();
+      setStatus('ИИ: решение готово (шаг ' + ctx.step + ')');
+      renderPanel(true);
+      showAi();
+    } catch (e) {
+      setStatus('ИИ не ответил: ' + e.message);
+      aiLast = Date.now();                 /* не долбим сервис при ошибке */
+    } finally {
+      aiBusy = false;
+      setSiteProgress(job ? (jobTotal() ? job.at / jobTotal() : 0) : -1);
+    }
+  }
+
+  /* окно с решением: текст, кнопка «скопировать» и ничего больше */
+  function showAi() {
+    if (!aiAnswer || !aiAnswer.text) return;
+    var old = document.getElementById('sgx-ai');
+    if (old) old.remove();
+    var box = document.createElement('div');
+    box.id = 'sgx-ai';
+    box.innerHTML = [
+      '<div class="sgx-ai-head"><span>Решение от ИИ</span>',
+      '<button class="sgx-ai-x" type="button" title="Закрыть">' + icon('close', 14) + '</button></div>',
+      '<textarea class="sgx-ai-text" readonly></textarea>',
+      '<div class="sgx-ai-foot">',
+      '<span class="sgx-ai-note">проверь перед отправкой · модель ' + aiAnswer.model + '</span>',
+      '<button class="sgx-ai-copy" type="button">' + icon('copy', 14) + 'Скопировать</button>',
+      '</div>'
+    ].join('');
+    document.body.appendChild(box);
+    box.querySelector('.sgx-ai-text').value = aiAnswer.text;
+    box.querySelector('.sgx-ai-x').addEventListener('click', function () { box.remove(); });
+    box.querySelector('.sgx-ai-copy').addEventListener('click', function () {
+      var ta = box.querySelector('.sgx-ai-text');
+      ta.removeAttribute('readonly');
+      ta.select();
+      var done = false;
+      try { done = document.execCommand('copy'); } catch (e) { done = false; }
+      ta.setAttribute('readonly', 'readonly');
+      if (!done) { toast('Не скопировалось — выдели текст и нажми Ctrl+C', true); return; }
+      toast('Скопировано');
+    });
   }
 
   /* ------------------------------------------------ структура курса и план */
@@ -1464,6 +1730,8 @@ function ensurePanel() {
       'Пройти и отправить</button>',
       '<button class="sgx-btn plain" id="sgx-collect" type="button">' + icon('download', 15) +
       'Собрать в Word</button>',
+      '<button class="sgx-btn ai" id="sgx-ai-btn" type="button">' + icon('spark', 15) +
+      'Спросить ИИ по шагу</button>',
       '<button class="sgx-btn plain" id="sgx-open" type="button">' + icon('refresh', 15) +
       'Скачать Word ещё раз</button>',
       '<button class="sgx-btn danger" id="sgx-stop" type="button">' + icon('stop', 14) +
@@ -1478,6 +1746,7 @@ function ensurePanel() {
     document.getElementById('sgx-collect').addEventListener('click', function () { beginJob('collect'); });
     document.getElementById('sgx-stop').addEventListener('click', function () { stopJob('остановлено'); });
     document.getElementById('sgx-open').addEventListener('click', function () { redownload(); });
+    document.getElementById('sgx-ai-btn').addEventListener('click', function () { askAi(); });
     renderPanel();
   }
 
@@ -1494,6 +1763,10 @@ async function beginJob(kind) {
     var ctx = stepContext();
     if (!ctx) { setStatus('открой любой урок курса на stepik.org'); return; }
     if (kind === 'solve' && !cfg.token) { setStatus('нужен токен записи — меню → ⚙ Токен записи'); return; }
+    if (job) {
+      setSticky('обход уже идёт — сначала «Остановить»');
+      return;
+    }
 
     var lFrom = document.getElementById('sgx-from-l').value;
     var lTo = document.getElementById('sgx-to-l').value;
@@ -1512,7 +1785,9 @@ async function beginJob(kind) {
     startJob(kind, plan, title);
   }
 
-  /* в Word собираем только задания с кодом: тесты с галочками и теорию пропускаем */
+  /* в Word собираем только задания с кодом: тесты с галочками и теорию пропускаем.
+     Если сохранённых ответов с кодом нет — берём все уроки диапазона: на месте
+     выяснится, что снимать. Но об этом честно говорим в статусе. */
   async function collectPlan(lessons) {
     var full = await lessonPlan(lessons);
     var idx = cacheIndex();
@@ -1520,7 +1795,9 @@ async function beginJob(kind) {
       var it = idx['l' + t.lesson + '_s' + t.step];
       return it && it.kind === 'code';
     });
-    return code.length ? code : full;
+    if (code.length) return code;
+    if (full.length) setStatus('ответов с кодом нет — пройду уроки и сниму то, что найду');
+    return full;
   }
 
   async function redownload() {
@@ -1632,6 +1909,11 @@ async function beginJob(kind) {
     if (entry && !dismissed[ctx.key]) {
       var target = insertTarget();
       if (target) showChip(target, entry.kind === 'choice' ? 'есть ответ' : 'есть решение');
+      else hideChip();
+    } else if (aiAnswer && aiAnswer.key === ctx.key && !dismissed[ctx.key]) {
+      /* решения в папке нет, зато его уже подсказал ИИ — предложим открыть */
+      var t2 = insertTarget();
+      if (t2) showChip(t2, 'есть решение ИИ');
       else hideChip();
     } else {
       hideChip();
@@ -1829,6 +2111,15 @@ async function beginJob(kind) {
       openPanel(true);
     });
 
+    GM_registerMenuCommand('✨ ИИ: решить текущий шаг', function () {
+      askAi();
+    });
+
+    GM_registerMenuCommand('📋 Показать решение от ИИ', function () {
+      if (!aiAnswer || !aiAnswer.text) { toast('ИИ ещё ничего не присылал на этом шаге'); return; }
+      showAi();
+    });
+
     GM_registerMenuCommand('🔄 Обновить список ответов', function () {
       storeIndex(true)
         .then(function (items) { toast('✓ В хранилище ' + Object.keys(items).length + ' ответов'); })
@@ -1841,7 +2132,17 @@ async function beginJob(kind) {
   function init() {
     injectBridge();
     ensurePanel();
-    if (job) setStatus('продолжаю: ' + (job.at + 1) + ' из ' + jobTotal());
+
+    /* задание пережило перезагрузку: сбрасываем поля перехода, иначе первый же
+       тик решит, что «переход не сработал», и пропустит нужный шаг */
+    if (job) {
+      job.navTo = '';
+      job.navAt = 0;
+      job.navHard = false;
+      saveJob();
+      setStatus('продолжаю: ' + (job.at + 1) + ' из ' + jobTotal());
+      setSiteProgress(jobTotal() ? job.at / jobTotal() : 0);
+    }
 
     if (!cfg.token) {
       toast('⚠ Укажите токен записи: меню Tampermonkey → ⚙ Токен записи', true);
