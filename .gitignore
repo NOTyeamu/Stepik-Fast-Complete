@@ -1,0 +1,7 @@
+# Зависимости теста (jsdom ставится в управляемую сборку Node)
+node_modules/
+
+# Мусор
+*.log
+.DS_Store
+Thumbs.db
