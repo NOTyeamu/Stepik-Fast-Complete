@@ -1,0 +1,13 @@
+{
+  "type": "choice",
+  "multiple": false,
+  "answers": [
+    "013"
+  ],
+  "options": [
+    "0123",
+    "013",
+    "23",
+    "01"
+  ]
+}

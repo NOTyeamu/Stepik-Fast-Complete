@@ -1,0 +1,13 @@
+{
+  "type": "choice",
+  "multiple": false,
+  "answers": [
+    "8"
+  ],
+  "options": [
+    "8",
+    "2",
+    "6",
+    "4"
+  ]
+}

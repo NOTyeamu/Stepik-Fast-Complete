@@ -1,0 +1,56 @@
+name: answers
+
+# Единственный, кто пишет в папку answers/. Пользовательский скрипт только
+# запускает этот workflow с полезной нагрузкой и права на запись в репозиторий
+# при этом не получает: у токена в скрипте есть только «Actions: write».
+#
+# Запуск вручную: Actions → answers → Run workflow (payload можно любой).
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: 'base64(JSON {key, kind, ext, content, author})'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  save:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Записать ответ
+        env:
+          PAYLOAD: ${{ inputs.payload }}
+        run: |
+          set -euo pipefail
+          git config user.name "stepik-answers-bot"
+          git config user.email "stepik-answers-bot@users.noreply.github.com"
+
+          # Попытки нужны, когда несколько человек сохраняют ответ одновременно:
+          # каждый раз начинаем с свежего main, поэтому конфликтов не бывает,
+          # а index.json пересобирается из фактического содержимого папки.
+          for attempt in 1 2 3 4 5; do
+            git fetch --depth 1 origin main
+            git reset --hard origin/main
+            node .github/scripts/save-answer.mjs
+            git add answers
+            if git diff --cached --quiet; then
+              echo "такой ответ уже есть — ничего не меняем"
+              exit 0
+            fi
+            git commit -q -m "answers: обновление из Stepik"
+            if git push origin HEAD:main; then
+              echo "готово"
+              exit 0
+            fi
+            echo "не успели — кто-то записал раньше, попытка $attempt"
+            sleep $((attempt * 3))
+          done
+          echo "не удалось записать после 5 попыток" >&2
+          exit 1

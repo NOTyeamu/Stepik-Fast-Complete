@@ -1,0 +1,13 @@
+{
+  "type": "choice",
+  "multiple": false,
+  "answers": [
+    "public static int"
+  ],
+  "options": [
+    "public static int",
+    "static void private",
+    "return static void",
+    "static string public"
+  ]
+}
