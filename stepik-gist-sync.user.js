@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      5.2.3
+// @version      5.3.0
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет».
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -51,7 +51,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '5.2.3';
+  var VERSION = '5.3.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -185,6 +185,7 @@
     cache = { at: Date.now(), items: items };
     saveCache();
     storeDown = 0;
+    renderPanel(true);                 /* список уроков зависит от того, что уже сохранено */
     return items;
   }
 
@@ -236,6 +237,7 @@
     cache.items[ctx.key] = entry;
     cache.at = Date.now();
     saveCache();
+    renderPanel(true);
     return { key: ctx.key };
   }
 
@@ -564,16 +566,27 @@
     return { ok: true, via: 'варианты', hits: hits };
   }
 
+/* Возвращаем и поле для вставки, и якорь для скобы: скоба должна обрамлять
+     весь блок задания (.attempt-wrapper__content), а не отдельный вопрос. */
   function insertTarget() {
-    var q = $('.quiz-component[data-type="choice-quiz"] input:not([disabled]), .quiz-plugin__content input:not([disabled])');
-    if (q) return { anchor: q.closest('.quiz-component, .quiz-plugin__content') };
-    var cm = $('.CodeMirror');
-    if (cm && cm.getBoundingClientRect().height) return { anchor: cm };
-    var c6 = $('.cm-content');
-    if (c6 && c6.getBoundingClientRect().height) return { anchor: c6.closest('.cm-editor') || c6 };
-    var field = $('.attempt-wrapper__plugin textarea, .quiz-component textarea');
-    if (field) return { anchor: field };
-    return null;
+    var el = null;
+    var q = $('.quiz-component[data-type="choice-quiz"] input:not([disabled]),' +
+      ' .quiz-plugin__content input:not([disabled])');
+    if (q) el = q.closest('.quiz-component, .quiz-plugin__content') || q;
+    if (!el) {
+      var cm = $('.CodeMirror');
+      if (cm && cm.getBoundingClientRect().height) el = cm;
+    }
+    if (!el) {
+      var c6 = $('.cm-content');
+      if (c6 && c6.getBoundingClientRect().height) el = c6.closest('.cm-editor') || c6;
+    }
+    if (!el) {
+      var field = $('.attempt-wrapper__plugin textarea, .quiz-component textarea');
+      if (field) el = field;
+    }
+    if (!el) return null;
+    return { el: el, anchor: cardOf(el) || el };
   }
 
   function cardOf(el) {
@@ -671,7 +684,8 @@
     '.sgx-flash{position:fixed;z-index:2147482000;pointer-events:none;border-radius:6px;opacity:1;',
     'background:rgba(56,178,113,.28);box-shadow:inset 0 0 0 2px rgba(56,178,113,.5);transition:opacity .4s ease}',
     '.sgx-flash.off{opacity:0}',
-    '#sgx-toast{position:fixed;right:16px;bottom:16px;z-index:2147483000;display:none;max-width:320px;',
+    '#sgx-toast{position:fixed;left:50%;transform:translateX(-50%);bottom:20px;z-index:2147483000;',
+    'display:none;max-width:min(420px,90vw);',
     'padding:9px 12px;border-radius:8px;border:1px solid #E6E5E3;background:#FFF;color:#2C2C2B;',
     'font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;box-shadow:0 1px 2px rgba(0,0,0,.05),0 4px 12px rgba(0,0,0,.06)}',
     '#sgx-toast.on{display:block}',
@@ -687,30 +701,47 @@
     '#sgx-report button{border:1px solid #E3E2E0;background:#fff;border-radius:6px;padding:6px 12px;',
     'font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#37352F;cursor:pointer}',
     '#sgx-report button:hover{background:#F1F1EF}',
-    /* --- панель «от и до» --- */
-    '#sgx-fab{position:fixed;left:16px;bottom:16px;z-index:2147482000;padding:10px 15px;border-radius:11px;',
-    'background:#2F7CE0;color:#fff;font:700 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;cursor:pointer;user-select:none;',
-    'box-shadow:0 4px 12px rgba(0,0,0,.28)}',
-    '#sgx-fab:hover{background:#2769C4}',
-    '#sgx-fab.busy{background:#E07B2F}',
-    '#sgx-panel{position:fixed;left:16px;bottom:66px;z-index:2147482000;display:none;width:340px;max-width:calc(100vw - 32px);',
-    'padding:14px;box-sizing:border-box;border-radius:12px;background:#fff;border:1px solid #DCDAD7;',
-    'box-shadow:0 12px 32px rgba(0,0,0,.22);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1F1D1B}',
-    '#sgx-panel *{box-sizing:border-box}',
+    /* --- панель «от и до»: показывается только из меню Tampermonkey --- */
+    '#sgx-panel{position:fixed;right:20px;bottom:20px;z-index:2147483000;display:none;width:312px;',
+    'max-width:calc(100vw - 32px);padding:0;overflow:hidden;box-sizing:border-box;border-radius:14px;',
+    'background:#FFFFFF;border:1px solid rgba(15,23,42,.08);',
+    'box-shadow:0 16px 40px rgba(15,23,42,.18),0 2px 8px rgba(15,23,42,.06);',
+    'font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#0F172A}',
     '#sgx-panel.on{display:block}',
-    '#sgx-panel h4{margin:0 0 10px;font-size:14px;color:#1F1D1B}',
-    '#sgx-panel .row{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}',
-    '#sgx-panel .row>span{flex:0 0 auto;color:#5C5854}',
-    '#sgx-panel select,#sgx-panel input{flex:1 1 80px;min-width:0;padding:7px 9px;border:1px solid #D5D3D0;',
-    'border-radius:7px;font:inherit;background:#fff;color:inherit}',
-    '#sgx-panel button{flex:1 1 100%;padding:9px 10px;border:0;border-radius:8px;cursor:pointer;',
-    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px;font-weight:600;line-height:1.2;background:#2F7CE0;color:#fff}',
-    '#sgx-panel button.sec{background:#EEF2F7;color:#1F1D1B}',
-    '#sgx-panel button.danger{background:#E05A4A;color:#fff}',
-    '#sgx-panel button:disabled{opacity:.45;cursor:default}',
-    '#sgx-status{margin:2px 0 8px;color:#5C5854;min-height:18px}',
-    '#sgx-panel #sgx-total{color:#8A8783;font-size:12px}'
-  ].join(''));
+    '#sgx-panel *{box-sizing:border-box}',
+    '#sgx-panel .sgx-head{display:flex;align-items:center;justify-content:space-between;',
+    'padding:13px 14px 11px;border-bottom:1px solid #F1F5F9}',
+    '#sgx-panel .sgx-title{font-size:15px;font-weight:700;letter-spacing:-.01em}',
+    '#sgx-panel .sgx-close{display:flex;align-items:center;justify-content:center;width:28px;height:28px;',
+    'border:0;border-radius:8px;background:#F1F5F9;color:#64748B;cursor:pointer;padding:0}',
+    '#sgx-panel .sgx-close:hover{background:#E2E8F0;color:#0F172A}',
+    '#sgx-panel .sgx-range{display:flex;align-items:center;gap:7px;padding:12px 14px 4px}',
+    '#sgx-panel .sgx-range label{flex:0 0 auto;font-size:12.5px;font-weight:600;color:#64748B}',
+    '#sgx-panel select{flex:1 1 0;min-width:0;height:34px;padding:0 8px;border:1px solid #E2E8F0;',
+    'border-radius:9px;background:#F8FAFC;color:#0F172A;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px;font-weight:600}',
+    '#sgx-panel select:focus{outline:2px solid #BFDBFE;outline-offset:1px}',
+    '#sgx-panel .sgx-note{padding:7px 14px 10px;font-size:12px;color:#94A3B8}',
+    '#sgx-panel .sgx-btn{display:flex;align-items:center;justify-content:center;gap:8px;',
+    'width:calc(100% - 28px);margin:0 14px 8px;height:38px;border:0;border-radius:10px;padding:0;',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13.5px;font-weight:700;letter-spacing:-.005em;cursor:pointer;',
+    'transition:filter .15s ease,transform .06s ease}',
+    '#sgx-panel .sgx-btn:active{transform:translateY(1px)}',
+    '#sgx-panel .sgx-btn.primary{background:#2563EB;color:#fff;box-shadow:0 6px 16px rgba(37,99,235,.30)}',
+    '#sgx-panel .sgx-btn.primary:hover{filter:brightness(1.07)}',
+    '#sgx-panel .sgx-btn.plain{background:#EEF2F7;color:#0F172A}',
+    '#sgx-panel .sgx-btn.plain:hover{background:#E2E8F0}',
+    '#sgx-panel .sgx-btn.danger{background:#FEF2F2;color:#DC2626}',
+    '#sgx-panel .sgx-btn.danger:hover{background:#FEE2E2}',
+    '#sgx-panel .sgx-btn:disabled{opacity:.45;cursor:default;box-shadow:none;filter:none}',
+    '#sgx-panel .sgx-ic{flex:0 0 auto}',
+    '#sgx-panel .sgx-progress{height:3px;background:#EEF2F7;margin-top:2px}',
+    '#sgx-panel .sgx-bar{height:100%;width:0;border-radius:0 2px 2px 0;',
+    'background:linear-gradient(90deg,#2563EB,#60A5FA);transition:width .35s ease}',
+    '#sgx-panel .sgx-status{padding:10px 14px 13px;font-size:12.5px;color:#475569;min-height:36px}',
+    /* тонкая полоска сверху страницы — как встроенный индикатор сайта */
+    '#sgx-progress{position:fixed;top:0;left:0;right:0;height:3px;z-index:2147483600;pointer-events:none}',
+    '#sgx-progress>div{height:100%;width:0;background:#2563EB;opacity:.85;transition:width .35s ease}',
+].join(''));
 
   var chip = null, chipAnchor = null, toastEl = null, toastTimer = null;
   var BRACE_W = 16;
@@ -908,14 +939,46 @@
 
   function jobTotal() { return job && job.plan ? job.plan.length : 0; }
 
+var ICONS = {
+    play: '<polygon points="6 4 19 12 6 20 6 4"/>',
+    download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/>' +
+      '<line x1="12" y1="15" x2="12" y2="3"/>',
+    refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>' +
+      '<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+    stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    close: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'
+  };
+
+  function icon(name, size) {
+    return '<svg class="sgx-ic" viewBox="0 0 24 24" width="' + (size || 16) + '" height="' + (size || 16) +
+      '" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"' +
+      ' aria-hidden="true">' + (ICONS[name] || '') + '</svg>';
+  }
+
   function setStatus(text) {
     var el = document.getElementById('sgx-status');
     if (el) el.textContent = text || '';
-    var fab = document.getElementById('sgx-fab');
-    if (fab) {
-      fab.textContent = job ? ('иду: ' + (job.at + 1) + ' из ' + jobTotal()) : 'от и до';
-      fab.classList.toggle('busy', !!job);
+    var total = jobTotal();
+    var ratio = job ? (total ? job.at / total : 0) : -1;
+    var bar = document.getElementById('sgx-bar');
+    if (bar) bar.style.width = (ratio < 0 ? 0 : Math.round(ratio * 100)) + '%';
+    setSiteProgress(ratio);
+  }
+
+  /* тонкая полоска вверху страницы: выглядит как встроенный индикатор Stepik */
+  function setSiteProgress(ratio) {
+    var el = document.getElementById('sgx-progress');
+    if (ratio < 0) {
+      if (el) el.remove();
+      return;
     }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'sgx-progress';
+      el.innerHTML = '<div></div>';
+      document.body.appendChild(el);
+    }
+    el.firstChild.style.width = Math.round((ratio || 0) * 100) + '%';
   }
 
   function startJob(kind, plan, title) {
@@ -1009,7 +1072,7 @@
       res = await insertSaved(ctx);
     } catch (e) {
       setStatus(target.label + ': ' + e.message + ' — пропускаю');
-      await sleep(1500);
+      await sleep(900);
       return nextJobStep();
     }
     await sleep(500);
@@ -1034,7 +1097,12 @@
     return nextJobStep();
   }
 
-  async function jobCollect(ctx, target) {
+async function jobCollect(ctx, target) {
+    /* скриншотим только там, где вставляют код, а не отвечают галочкой */
+    if (!$('.CodeMirror, .cm-content, .attempt-wrapper__plugin textarea')) {
+      setStatus((job.at + 1) + ' из ' + jobTotal() + ': ' + target.label + ' — не код, пропускаю');
+      return nextJobStep();
+    }
     setStatus((job.at + 1) + ' из ' + jobTotal() + ': ' + target.label + ' — снимаю скриншот');
     var shot = await shootStep(ctx, target);
     if (shot) {
@@ -1320,45 +1388,44 @@
     return all.slice(i, j + 1);
   }
 
-  function stepsPlan(ctx, from, to) {
-    var plan = [];
-    for (var s = from; s <= to; s++) plan.push({ lesson: ctx.lesson, step: s, label: 'шаг ' + s });
-    return plan;
-  }
-
   /* --------------------------------------------------------------- панель */
 
-  function mode() {
-    var sel = document.getElementById('sgx-mode');
-    return sel ? sel.value : 'lessons';
+/* в списках показываем только те уроки, для которых уже есть сохранённые ответы */
+  function lessonsWithAnswers() {
+    var idx = cacheIndex();
+    var have = {};
+    Object.keys(idx).forEach(function (key) {
+      var m = /^l(\d+)_s\d+$/.exec(key);
+      if (m) have[m[1]] = 1;
+    });
+    var all = lessonList();
+    var only = all.filter(function (l) { return have[l.id]; });
+    return only.length ? only : all;
   }
 
   function renderPanel(keepStatus) {
     var panel = document.getElementById('sgx-panel');
     if (!panel) return;
     var ctx = stepContext();
-    var lessons = lessonList();
-    var bySteps = mode() === 'steps';
-
-    document.getElementById('sgx-row-lessons').style.display = bySteps ? 'none' : 'flex';
-    document.getElementById('sgx-row-steps').style.display = bySteps ? 'flex' : 'none';
-
-    /* список уроков — обычным выпадающим списком: видно все, а не только текущий */
+    var lessons = lessonsWithAnswers();
     var fromSel = document.getElementById('sgx-from-l');
     var toSel = document.getElementById('sgx-to-l');
-    if (fromSel.options.length !== lessons.length) {
+
+    var want = lessons.map(function (l) { return l.label; }).join(',');
+    var have = Array.prototype.map.call(fromSel.options, function (o) { return o.value; }).join(',');
+    if (want !== have) {
       var keepFrom = fromSel.value, keepTo = toSel.value;
       [fromSel, toSel].forEach(function (sel) {
         sel.innerHTML = '';
         lessons.forEach(function (l) {
           var o = document.createElement('option');
           o.value = l.label;
-          o.textContent = l.label + ' — ' + (l.title || '').slice(0, 34);
+          o.textContent = l.label + ' · ' + (l.title || '').slice(0, 26);
           sel.appendChild(o);
         });
       });
-      if (keepFrom) fromSel.value = keepFrom;
-      if (keepTo) toSel.value = keepTo;
+      if (keepFrom && want.indexOf(keepFrom) >= 0) fromSel.value = keepFrom;
+      if (keepTo && want.indexOf(keepTo) >= 0) toSel.value = keepTo;
     }
     if (lessons.length) {
       if (!fromSel.value) {
@@ -1368,63 +1435,45 @@
       if (!toSel.value) toSel.value = fromSel.value;
     }
 
-    var from = document.getElementById('sgx-from');
-    var to = document.getElementById('sgx-to');
-    if (ctx && bySteps && document.activeElement !== from && document.activeElement !== to) {
-      if (!from.value || isNaN(parseInt(from.value, 10))) from.value = ctx.step;
-      if (!to.value || isNaN(parseInt(to.value, 10))) to.value = ctx.step;
+    var note = document.getElementById('sgx-total');
+    if (note) {
+      note.textContent = lessons.length
+        ? 'уроков с ответами: ' + lessons.length
+        : 'ответов пока нет — сначала сохрани хотя бы один';
     }
 
-    var total = document.getElementById('sgx-total');
-    if (total) {
-      total.textContent = bySteps
-        ? 'в уроке ' + ((stepIds[ctx && ctx.lesson] && stepIds[ctx.lesson].length) || '?') + ' шагов'
-        : 'в меню ' + lessons.length + ' уроков';
-    }
-
-    var solving = !!job;
-    document.getElementById('sgx-solve').disabled = solving;
-    document.getElementById('sgx-collect').disabled = solving;
-    document.getElementById('sgx-stop').disabled = !solving;
-    document.getElementById('sgx-open').style.display =
-      (job && job.shots && job.shots.length) ? 'block' : 'none';
-    if (!keepStatus && !solving) setStatus('');
+    var busy = !!job;
+    document.getElementById('sgx-solve').disabled = busy;
+    document.getElementById('sgx-collect').disabled = busy;
+    document.getElementById('sgx-stop').disabled = !busy;
+    document.getElementById('sgx-open').style.display = (job && job.shots && job.shots.length) ? 'flex' : 'none';
+    if (!keepStatus && !busy) setStatus('');
   }
 
-  function ensurePanel() {
-    if (document.getElementById('sgx-fab')) return;
-    var fab = document.createElement('div');
-    fab.id = 'sgx-fab';
-    fab.textContent = 'от и до';
-    fab.title = 'Пройти пачку заданий или собрать их в Word';
-    document.body.appendChild(fab);
-
+function ensurePanel() {
+    if (document.getElementById('sgx-panel')) return;
     var panel = document.createElement('div');
     panel.id = 'sgx-panel';
     panel.innerHTML = [
-      '<h4>Пройти задания</h4>',
-      '<div class="row"><select id="sgx-mode">',
-      '<option value="lessons">уроки курса (4.1 … 4.3)</option>',
-      '<option value="steps">шаги одного урока</option>',
-      '</select></div>',
-      '<div class="row" id="sgx-row-lessons">с <select id="sgx-from-l"></select>',
-      'по <select id="sgx-to-l"></select></div>',
-      '<div class="row" id="sgx-row-steps">с <input id="sgx-from" type="number" min="1">',
-      'по <input id="sgx-to" type="number" min="1"></div>',
-      '<div class="row"><span id="sgx-total"></span></div>',
-      '<div class="row"><button id="sgx-solve">Пройти: вставить и отправить</button></div>',
-      '<div class="row"><button id="sgx-collect" class="sec">Собрать в Word со скринами</button></div>',
-      '<div id="sgx-status"></div>',
-      '<div class="row"><button id="sgx-open" class="sec">Скачать Word ещё раз</button></div>',
-      '<div class="row"><button id="sgx-stop" class="danger">Остановить</button></div>'
+      '<div class="sgx-head"><span class="sgx-title">Задания Stepik</span>',
+      '<button class="sgx-close" type="button" title="Закрыть">' + icon('close', 15) + '</button></div>',
+      '<div class="sgx-range"><label>с</label><select id="sgx-from-l"></select>',
+      '<label>по</label><select id="sgx-to-l"></select></div>',
+      '<div class="sgx-note" id="sgx-total"></div>',
+      '<button class="sgx-btn primary" id="sgx-solve" type="button">' + icon('play', 15) +
+      'Пройти и отправить</button>',
+      '<button class="sgx-btn plain" id="sgx-collect" type="button">' + icon('download', 15) +
+      'Собрать в Word</button>',
+      '<button class="sgx-btn plain" id="sgx-open" type="button">' + icon('refresh', 15) +
+      'Скачать Word ещё раз</button>',
+      '<button class="sgx-btn danger" id="sgx-stop" type="button">' + icon('stop', 14) +
+      'Остановить</button>',
+      '<div class="sgx-progress"><div class="sgx-bar" id="sgx-bar"></div></div>',
+      '<div class="sgx-status" id="sgx-status"></div>'
     ].join('');
     document.body.appendChild(panel);
 
-    fab.addEventListener('click', function () {
-      panel.classList.toggle('on');
-      renderPanel();
-    });
-    document.getElementById('sgx-mode').addEventListener('change', function () { renderPanel(); });
+    panel.querySelector('.sgx-close').addEventListener('click', function () { openPanel(false); });
     document.getElementById('sgx-solve').addEventListener('click', function () { beginJob('solve'); });
     document.getElementById('sgx-collect').addEventListener('click', function () { beginJob('collect'); });
     document.getElementById('sgx-stop').addEventListener('click', function () { stopJob('остановлено'); });
@@ -1432,38 +1481,46 @@
     renderPanel();
   }
 
-  async function beginJob(kind) {
+  /* панель открывается только из меню Tampermonkey — на странице её не видно */
+  function openPanel(on) {
+    ensurePanel();
+    var panel = document.getElementById('sgx-panel');
+    panel.classList.toggle('on', on !== false);
+    if (on !== false) renderPanel();
+    if (on === false) setSiteProgress(job ? 0 : -1);
+  }
+
+async function beginJob(kind) {
     var ctx = stepContext();
-    if (!ctx) { setStatus('открой урок: stepik.org/lesson/<урок>/step/<номер>'); return; }
+    if (!ctx) { setStatus('открой любой урок курса на stepik.org'); return; }
     if (kind === 'solve' && !cfg.token) { setStatus('нужен токен записи — меню → ⚙ Токен записи'); return; }
 
+    var lFrom = document.getElementById('sgx-from-l').value;
+    var lTo = document.getElementById('sgx-to-l').value;
     var plan = [], title = '';
-
     try {
-      if (mode() === 'steps') {
-        var from = document.getElementById('sgx-from').value;
-        var to = document.getElementById('sgx-to').value;
-        var a = parseInt(from, 10), b = parseInt(to, 10);
-        if (!a || a < 1) throw new Error('укажи номер первого шага');
-        if (!b || b < a) throw new Error('последний шаг должен быть не меньше первого');
-        b = Math.min(b, a + 200);
-        plan = stepsPlan(ctx, a, b);
-        title = 'урок ' + ctx.lesson + ', шаги ' + a + '–' + b;
-      } else {
-        var lFrom = document.getElementById('sgx-from-l').value;
-        var lTo = document.getElementById('sgx-to-l').value;
-        if (!lFrom || !lTo) throw new Error('в меню курса не нашлись уроки — открой любой урок этого курса');
-        var lessons = lessonsInRange(lFrom, lTo);
-        setStatus('собираю список заданий…');
-        plan = await lessonPlan(lessons);
-        title = 'уроки ' + lessons[0].label + '–' + lessons[lessons.length - 1].label;
-        if (!plan.length) throw new Error('не получил список шагов — открой любой урок этого курса и повтори');
-      }
+      if (!lFrom || !lTo) throw new Error('в списке нет уроков с ответами');
+      var lessons = lessonsInRange(lFrom, lTo);
+      setStatus('собираю список заданий…');
+      plan = kind === 'collect' ? await collectPlan(lessons) : await lessonPlan(lessons);
+      title = 'уроки ' + lessons[0].label + '–' + lessons[lessons.length - 1].label;
+      if (!plan.length) throw new Error('в этих уроках не нашлось подходящих заданий');
     } catch (e) {
       setStatus(e.message);
       return;
     }
     startJob(kind, plan, title);
+  }
+
+  /* в Word собираем только задания с кодом: тесты с галочками и теорию пропускаем */
+  async function collectPlan(lessons) {
+    var full = await lessonPlan(lessons);
+    var idx = cacheIndex();
+    var code = full.filter(function (t) {
+      var it = idx['l' + t.lesson + '_s' + t.step];
+      return it && it.kind === 'code';
+    });
+    return code.length ? code : full;
   }
 
   async function redownload() {
@@ -1510,7 +1567,7 @@
       /* контейнер задания есть — ждём редактор, он появляется не сразу */
       if (editorComing()) return Date.now() - readySince > 6000;
       /* ни поля, ни контейнера — вставлять нечего, не тянем время */
-      return Date.now() - cardSince > 1500;
+      return Date.now() - cardSince > 1200;
     }
     return Date.now() - readySince > 8000;             /* страницы нет вовсе */
   }
@@ -1768,10 +1825,8 @@
       selfTest().catch(function (err) { toast('⚠ ' + err.message, true); });
     });
 
-    GM_registerMenuCommand('📄 Пройти от и до / собрать в Word', function () {
-      ensurePanel();
-      document.getElementById('sgx-panel').classList.add('on');
-      renderPanel();
+    GM_registerMenuCommand('📄 Пройти задания / собрать в Word', function () {
+      openPanel(true);
     });
 
     GM_registerMenuCommand('🔄 Обновить список ответов', function () {
@@ -1791,7 +1846,9 @@
     if (!cfg.token) {
       toast('⚠ Укажите токен записи: меню Tampermonkey → ⚙ Токен записи', true);
     }
-    storeIndex(false).catch(function (err) { log('список ответов:', err.message); });
+    storeIndex(false)
+      .then(function () { renderPanel(true); })
+      .catch(function (err) { log('список ответов:', err.message); });
 
     setInterval(tick, 1500);
     setInterval(function () { if (chipAnchor) positionChip(chipAnchor); }, 500);

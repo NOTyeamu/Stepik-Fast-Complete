@@ -125,7 +125,11 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
     window.URL.revokeObjectURL = function () {};
 
     window.Element.prototype.getBoundingClientRect = function () {
-      return { width: 600, height: 200, top: 100, left: 50, right: 650, bottom: 300, x: 50, y: 100 };
+      const cl = this.classList || { contains: () => false };
+      let h = 200;
+      if (cl.contains('attempt-wrapper__content')) h = 300;     /* карточка задания */
+      else if (cl.contains('quiz-component')) h = 120;          /* блок с вариантами */
+      return { width: 600, height: h, top: 100, left: 50, right: 650, bottom: 100 + h, x: 50, y: 100 };
     };
     Object.defineProperty(window.HTMLElement.prototype, 'offsetWidth', { get: () => 120, configurable: true });
 
@@ -227,6 +231,7 @@ const SIDEBAR_HTML = `<!doctype html><html><body>
     <a href="/lesson/1755852">4.1 Знакомство с методами</a>
     <a href="/lesson/1755853">4.2 Перегрузка и возвращаемое значение</a>
     <a href="/lesson/1755854">4.3 Массивы и возврат значения</a>
+    <a href="/lesson/1755855">4.4 Рекурсивные методы</a>
   </div>
   <div class="attempt-wrapper"><div class="attempt-wrapper__content">
     <div class="step-text">Задание</div>
@@ -399,31 +404,29 @@ const CHOICE_HTML = `<!doctype html><html><body>
     }
   });
 
-  console.log('\n=== 10. панель «от и до» появилась ===');
+  console.log('\n=== 10. панель открывается только из меню ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
     store: {}, submissions: [], html: HTML, waitMs: 2000,
-    afterRun: async (win) => {
-      const fab = win.document.querySelector('#sgx-fab');
+    afterRun: async (win, st) => {
       const panel = win.document.querySelector('#sgx-panel');
-      check('кнопка «от и до» есть', !!fab, fab && fab.textContent);
-      check('панель есть', !!panel);
-      check('есть выбор «уроки / шаги»', !!win.document.querySelector('#sgx-mode'));
-      check('режим по умолчанию — уроки', win.document.querySelector('#sgx-mode').value === 'lessons');
-      check('в режиме уроков видны списки уроков', !!win.document.querySelector('#sgx-from-l'));
-      check('в режиме уроков поля шагов скрыты',
-        win.document.querySelector('#sgx-row-steps').style.display === 'none',
-        win.document.querySelector('#sgx-row-steps').style.display);
-      check('есть кнопка «Пройти»', /Пройти/.test(win.document.querySelector('#sgx-solve').textContent));
-      check('есть кнопка «Собрать в Word»', /Word/.test(win.document.querySelector('#sgx-collect').textContent));
-      fab.click();
-      check('панель открывается', panel.classList.contains('on'));
-      /* по умолчанию режим «уроки», а в режиме шагов номер подставляется сам */
-      win.document.querySelector('#sgx-mode').value = 'steps';
-      win.document.querySelector('#sgx-mode').dispatchEvent(new win.Event('change'));
-      check('номер шага подставился автоматически',
-        win.document.querySelector('#sgx-from').value === '8',
-        win.document.querySelector('#sgx-from').value);
+      check('панель создана', !!panel);
+      check('на странице её не видно', !panel.classList.contains('on'));
+      check('кнопки «от и до» на странице нет', !win.document.querySelector('#sgx-fab'));
+      check('есть список «с»', !!win.document.querySelector('#sgx-from-l'));
+      check('есть список «по»', !!win.document.querySelector('#sgx-to-l'));
+      check('нет переключателя «уроки / шаги»', !win.document.querySelector('#sgx-mode'));
+      const solve = win.document.querySelector('#sgx-solve');
+      const collect = win.document.querySelector('#sgx-collect');
+      check('«Пройти и отправить» с иконкой',
+        /Пройти/.test(solve.textContent) && !!solve.querySelector('svg'), solve.textContent);
+      check('«Собрать в Word» с иконкой',
+        /Собрать в Word/.test(collect.textContent) && !!collect.querySelector('svg'), collect.textContent);
+      check('есть кнопка закрытия', !!win.document.querySelector('#sgx-panel .sgx-close'));
+      st.menu['📄 Пройти задания / собрать в Word']();
+      check('меню открывает панель', panel.classList.contains('on'));
+      win.document.querySelector('#sgx-panel .sgx-close').click();
+      check('крестик закрывает панель', !panel.classList.contains('on'));
     }
   });
 
@@ -489,12 +492,20 @@ const CHOICE_HTML = `<!doctype html><html><body>
   console.log('\n=== 14. «с 4.1 по 4.3»: план из уроков курса ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    store: {}, submissions: [], html: SIDEBAR_HTML, waitMs: 3000,
+    store: {
+      l1755852_s1: { file: 'l1755852_s1.cs', ext: 'cs', kind: 'code', content: 'a' },
+      l1755853_s1: { file: 'l1755853_s1.cs', ext: 'cs', kind: 'code', content: 'b' },
+      l1755854_s1: { file: 'l1755854_s1.cs', ext: 'cs', kind: 'code', content: 'c' }
+    },
+    submissions: [], html: SIDEBAR_HTML, waitMs: 3000,
     afterRun: async (win, st) => {
       const sel = win.document.querySelector('#sgx-from-l');
       const opts = sel.querySelectorAll('option');
-      check('уроки нашлись в меню курса', opts.length === 3, opts.length + ': ' +
-        Array.from(opts).map((o) => o.value).join(', '));
+      check('в списке только уроки с ответами (в меню 4 урока, ответы у трёх)',
+        opts.length === 3, opts.length + ': ' + Array.from(opts).map((o) => o.value).join(', '));
+      check('урок без ответов не попал в список',
+        !Array.from(opts).some((o) => o.value === '4.4'),
+        Array.from(opts).map((o) => o.value).join(','));
       check('в списке все номера уроков', Array.from(opts).map((o) => o.value).join(',') === '4.1,4.2,4.3',
         Array.from(opts).map((o) => o.value).join(','));
       check('в списке видно название урока', /Знакомство с методами/.test(opts[0].textContent),
@@ -518,22 +529,21 @@ const CHOICE_HTML = `<!doctype html><html><body>
     }
   });
 
-  console.log('\n=== 15. диапазон по шагам одного урока ===');
+  console.log('\n=== 15. скоба обрамляет весь блок задания, а не вопрос ===');
   await run({
-    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    store: {}, submissions: [], html: SIDEBAR_HTML, waitMs: 3000,
-    afterRun: async (win, st) => {
-      win.document.querySelector('#sgx-mode').value = 'steps';
-      win.document.querySelector('#sgx-mode').dispatchEvent(new win.Event('change'));
-      win.document.querySelector('#sgx-from').value = '2';
-      win.document.querySelector('#sgx-to').value = '4';
-      win.document.querySelector('#sgx-collect').click();
-      await new Promise((r) => setTimeout(r, 800));
-
-      const job = JSON.parse(st.storage.job || 'null');
-      check('план из трёх шагов', job && job.plan.length === 3, job && job.plan.length);
-      check('все шаги текущего урока', job && job.plan.every((p) => p.lesson === String(LESSON)));
-      check('первый шаг — 2', job && job.plan[0].step === 2, job && job.plan[0].step);
+    url: `https://stepik.org/lesson/${LESSON}/step/9?unit=1818966`,
+    store: {
+      l1793281_s9: {
+        file: 'l1793281_s9.json', ext: 'json', kind: 'choice',
+        content: JSON.stringify({ type: 'choice', ids: [333], answers: ['третий'] })
+      }
+    },
+    submissions: [], html: CHOICE_HTML, waitMs: 2600,
+    afterRun: async (win) => {
+      const chip = win.document.querySelector('#sgx-chip');
+      check('скоба показана', chip && chip.classList.contains('on'));
+      check('высота по блоку задания (300), а не по вопросу (120)',
+        chip.style.height === '300px', chip.style.height);
     }
   });
 
@@ -573,12 +583,27 @@ const CHOICE_HTML = `<!doctype html><html><body>
   console.log('\n=== 18. шаг без полей — пропускается сразу ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    store: {}, submissions: [], html: THEORY_HTML, waitMs: 6000,
+    store: {}, submissions: [], html: THEORY_HTML, waitMs: 7500,
     job: { kind: 'solve', plan: [{ lesson: String(LESSON), step: 8, label: 'шаг 8' }], at: 0, shots: [], title: 'тест' },
     afterRun: async (win, st) => {
       check('шаг пропущен, обход закончен', JSON.parse(st.storage.job || 'null') === null,
         st.storage.job);
       check('в статусе «готово»', /готово/.test(win.document.querySelector('#sgx-status').textContent),
+        win.document.querySelector('#sgx-status').textContent);
+    }
+  });
+
+  console.log('\n=== 19. в Word не попадают задания с галочками ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/9?unit=1818966`,
+    store: {}, submissions: [], html: CHOICE_HTML, waitMs: 7500,
+    job: { kind: 'collect', plan: [{ lesson: String(LESSON), step: 9, label: 'шаг 9' }], at: 0, shots: [], title: 'тест' },
+    afterRun: async (win, st) => {
+      check('скриншот не снимался', st.shots === 0, 'снимков: ' + st.shots);
+      check('обход закончен', JSON.parse(st.storage.job || 'null') === null, st.storage.job);
+      check('статус говорит про «не код»', /не код|скриншот/.test(
+        win.document.querySelector('#sgx-status').textContent) ||
+        /готово/.test(win.document.querySelector('#sgx-status').textContent),
         win.document.querySelector('#sgx-status').textContent);
     }
   });
