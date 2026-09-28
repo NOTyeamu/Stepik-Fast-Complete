@@ -343,6 +343,43 @@ const AI_HTML = `<!doctype html><html><body>
   </div></div>
 </body></html>`;
 
+/* Ровно та вёрстка, на которой человек получил «условие отсутствует»: условие лежит
+   в .html-content.rich-text-viewer, тесты — в таблице «Тестовые данные». */
+const AI_REAL_HTML = `<!doctype html><html><body>
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="step-inner page-fragment">
+      <div class="html-content rich-text-viewer">
+        <span><p>Создайте метод <code>PrintSquare(int x)</code>, который выводит куб переданного числа.</p></span>
+      </div>
+      <div class="step-text__samples-wrapper">
+        <div class="step-text__samples-header">
+          <div class="step-text__samples-header-title">Тестовые данные</div>
+        </div>
+        <div class="attempt-wrapper-samples">
+          <div class="attempt-wrapper-samples__data-row">
+            <div>1</div>
+            <div class="attempt-wrapper-samples__data-row-content"><span>5</span></div>
+            <div class="attempt-wrapper-samples__data-row-content"><span>125</span></div>
+          </div>
+          <div class="attempt-wrapper-samples__data-row">
+            <div>2</div>
+            <div class="attempt-wrapper-samples__data-row-content"><span>3</span></div>
+            <div class="attempt-wrapper-samples__data-row-content"><span>27</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="CodeMirror"><textarea></textarea></div>
+  </div></div>
+</body></html>`;
+
+/* Карточка без условия вовсе: редактор есть, текста задания нет. */
+const AI_NO_TASK_HTML = `<!doctype html><html><body>
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="CodeMirror"><textarea></textarea></div>
+  </div></div>
+</body></html>`;
+
 (async () => {
   console.log('\n=== 1. автосохранение зачтённого шага ===');
   await run({
@@ -1079,6 +1116,41 @@ const AI_HTML = `<!doctype html><html><body>
         !!box && /думал-думал/.test(box.querySelector('.sgx-ai-text').value),
         box ? box.querySelector('.sgx-ai-text').value : 'окна нет');
       check('в редактор по-прежнему ничего не попало', st.setValue === null);
+    }
+  });
+
+  console.log('\n=== 32. условие и тесты из настоящей вёрстки доходят до ИИ ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_REAL_HTML, waitMs: 5000,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+
+      check('запрос к ИИ ушёл', st.aiCalls.length === 1, 'запросов: ' + st.aiCalls.length);
+      const body = (st.aiCalls[0] && st.aiCalls[0].body) || '';
+      /* раньше в запрос уезжала пустая заготовка — здесь проверяем сам текст */
+      check('в запросе есть условие задания', /PrintSquare/.test(body), 'условие найдено');
+      check('в запросе есть тестовые данные', /вход: 5/.test(body), 'тесты найдены');
+      check('вход и выход не перепутаны', /выход: 125/.test(body), 'пары верные');
+      check('модели сказано свериться с тестами', /Сверься с/.test(body), 'подсказка есть');
+      check('шаблонного «условие отсутствует» быть не может',
+        !/условие отсутствует/i.test(body), 'чисто');
+    }
+  });
+
+  console.log('\n=== 33. условия нет → говорим прямо, а не просим ИИ угадать ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_NO_TASK_HTML, waitMs: 5000,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 1500));
+      const status = statusText(win);
+      check('сказано, что условия не видно', /не вижу условия/.test(status), status);
+      check('к ИИ НЕ обращались — незачем', st.aiCalls.length === 0,
+        'запросов: ' + st.aiCalls.length);
+      check('окно решения не открылось', !win.document.querySelector('#sgx-ai'));
     }
   });
 

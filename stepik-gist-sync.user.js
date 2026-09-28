@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.1.0
+// @version      6.1.1
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ — по бесплатному каналу, а при его отказе по своему.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -53,7 +53,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.1.0';
+  var VERSION = '6.1.1';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -1592,11 +1592,70 @@ async function jobCollect(ctx, target) {
     try { GM_setValue('aiLast_' + chId, aiLast); } catch (e) { /* ignore */ }
   }
 
-  /* текст задания с карточки: условие + код, если он в условии */
+  /* Текст условия. Раньше здесь было три жёстких контейнера, и если Stepik
+     отрисовывал карточку иначе (условие вне .attempt-wrapper__content), скрипт
+     молча отправлял ИИ пустоту — тот честно отвечал «условие отсутствует».
+     Поэтому: собираем по списку реальных контейнеров, убираем дубли по тексту,
+     и отдельно приклеиваем «Тестовые данные» — без них код неверный.            */
+  var STEP_TEXT_SELS = [
+    '.html-content.rich-text-viewer',      /* условие в текущей вёрстке Stepik */
+    '.step-text',                          /* старая вёрстка и заголовок шага */
+    '.problem__header',
+    '.step-inner .html-content',
+    '.attempt-wrapper__content'
+  ];
+
+  function stepConditionText() {
+    var seen = [];
+    var parts = [];
+    for (var i = 0; i < STEP_TEXT_SELS.length; i++) {
+      var nodes = $$(STEP_TEXT_SELS[i]);
+      for (var j = 0; j < nodes.length; j++) {
+        var t = norm(nodes[j].textContent || '');
+        if (t.length < 2) continue;
+        /* .attempt-wrapper__content вбирает в себя условие целиком, поэтому его
+           берём последним и только если ничего другого не нашлось */
+        if (seen.indexOf(t) >= 0) continue;
+        seen.push(t);
+        parts.push(t);
+      }
+      if (parts.length) break;
+    }
+    return parts.join('\n');
+  }
+
+  /* Таблица «вход → выход»: самое ценное для ИИ — по ней он понимает формат ввода.
+     В строке первым идёт номер теста, дальше вход и выход, поэтому берём только
+     ячейки .attempt-wrapper-samples__data-row-content и разбираем их по порядку.
+     Колонок может быть и одна (усечённая карточка) — тогда пишем что есть, не
+     выдумывая пустой «выход».                                                   */
+  function stepSamplesText() {
+    var box = $('.step-text__samples-wrapper') ||
+      $('.attempt-wrapper-samples-wrapper');
+    if (!box) return '';
+    var rows = $$('.attempt-wrapper-samples__data-row', box);
+    var out = [];
+    for (var i = 0; i < rows.length; i++) {
+      var cells = $$('.attempt-wrapper-samples__data-row-content', rows[i]);
+      if (!cells.length) continue;
+      /* склеиваем «сырой» текст ячейки, но выкидываем подписи кнопок «копировать» */
+      var vals = cells.map(function (c) { return norm(c.textContent || ''); });
+      vals = vals.filter(function (v) { return v.length; });
+      if (!vals.length) continue;
+      var line = (i + 1) + ') вход: ' + vals[0];
+      if (vals.length > 1) line += ' → выход: ' + vals[1];
+      out.push(line);
+    }
+    if (out.length) return 'Тестовые данные:\n' + out.join('\n');
+    var alt = norm(box.textContent || '');
+    return alt.length > 10 ? alt : '';
+  }
+
   function stepPrompt() {
-    var card = $('.attempt-wrapper__content') || $('.step-text') || document.body;
-    var text = norm(card.textContent || '');
-    text = text.replace(/Отправить на проверку|Решить снова|Скачать|Показать ответ/g, ' ');
+    var cond = stepConditionText();
+    var samples = stepSamplesText();
+    var text = norm((cond + '\n' + samples).replace(
+      /Отправить на проверку|Решить снова|Скачать|Показать ответ|Тестовые данные(?=\s*№)/g, ' '));
     return text.slice(0, 2500);
   }
 
@@ -1635,7 +1694,14 @@ async function jobCollect(ctx, target) {
     var ask = kind === 'choice'
       ? 'Задание — тест с выбором. Пришли номер правильного варианта и его текст, коротко.'
       : (lang ? 'Пиши на ' + lang + '.' : 'Определи язык по условию и пиши на нём.');
-    return ask + '\n\nУсловие:\n' + stepPrompt();
+    var task = stepPrompt();
+    /* Тестовые данные — это и есть формат ввода-вывода: без них модель пишет код,
+       который читает не то и выводит не так. Просим свериться с ними явно. */
+    var hint = /вход:/.test(task)
+      ? '\nСверься с «Тестовые данные»: программа должна читать ровно то, что во «вход»,\n' +
+        'и печатать ровно то, что в «выход».'
+      : '';
+    return ask + hint + '\n\nУсловие:\n' + task;
   }
 
   /* Чем решали — показываем человеку: он должен понимать, какой канал сработал. */
@@ -1700,7 +1766,13 @@ async function jobCollect(ctx, target) {
     if (wait) { setStatus('ИИ: лимит канала, подожди ' + wait + ' с'); return; }
 
     var task = stepPrompt();
-    if (task.length < 20) { setStatus('ИИ: не вижу текста задания на странице'); return; }
+    /* Пустое условие — это не «ИИ не смог», а «я не нашёл задание». Отправлять
+       пустоту бессмысленно: модель честно ответит «условие отсутствует», и человек
+       решит, что от него чего-то ждут. Говорим прямо, что не видим условие. */
+    if (task.length < 40) {
+      setStatus('ИИ: не вижу условия задания на странице — раскрой карточку и попробуй снова');
+      return;
+    }
 
     var kind = stepKindNow();
     aiBusy = true;
