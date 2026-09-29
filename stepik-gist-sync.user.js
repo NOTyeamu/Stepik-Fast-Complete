@@ -2329,8 +2329,6 @@ async function jobCollect(ctx, target) {
      после «Спросить ИИ по шагу» и наполняем лентой сообщений. Печатать в ленте
      нельзя, поэтому это не textarea, а набор блоков: так человек видит и ход
      работы («думает»), и ошибки тестов, и итоговый код.                        */
-  function aiPanelEl() { return document.getElementById('sgx-ai-panel'); }
-
   function aiRootEl() { return document.getElementById('sgx-ai-root'); }
 
   function aiLogEl() { return document.getElementById('sgx-ai-log'); }
