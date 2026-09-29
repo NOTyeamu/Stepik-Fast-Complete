@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.6.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам вставляет в редактор и нажимает «Запустить код» (отправку на проверку — никогда). Модель выбирается списком со значком и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Если тесты не прошли — ИИ прочитает ошибку и попробует исправить сам.
+// @version      6.7.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам вставляет в редактор и нажимает «Запустить код» (отправку на проверку — никогда). Модель выбирается списком со значком и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
@@ -64,7 +64,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.6.0';
+  var VERSION = '6.7.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -903,9 +903,13 @@
     'width:var(--sgx-ctl);height:var(--sgx-ctl);padding:0;border:1px solid var(--sgx-bd);',
     'border-radius:var(--sgx-r-sm);background:#fff;color:#4B4A47;cursor:pointer}',
     '#sgx-ai-panel .sgx-ai-tool:hover{background:#F1F1EF;color:#1F1D1B}',
-    '#sgx-ai-panel .sgx-ai-lang{display:flex;align-items:center;height:var(--sgx-ctl);',
-    'padding:0 var(--sgx-s3);border-radius:var(--sgx-r-sm);border:1px solid var(--sgx-bd);background:#fff;',
-    'font-size:var(--sgx-f-xs);color:#5A5955;white-space:nowrap}',
+    /* отчёт проверки: проваленные тесты — красным, пройденные — спокойным */
+    '#sgx-ai-panel .sgx-ai-report{display:flex;flex-direction:column;gap:2px;padding:var(--sgx-s3);',
+    'border-radius:var(--sgx-r-sm);background:#FAFAF9;border:1px solid #ECECEA;',
+    'font:var(--sgx-f-xs)/1.55 ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,Menlo,monospace}',
+    '#sgx-ai-panel .sgx-ai-repline.bad{color:#B3261E;font-weight:600}',
+    '#sgx-ai-panel .sgx-ai-repline.ok{color:#2C6B3C}',
+    '#sgx-ai-panel .sgx-ai-repline.note{color:#6B6A67}',
     /* --- выбор модели: свой список, а не родной select ---
        Родной <select> в списке значков не покажет, а человек просил значок модели
        слева и «ум» справа. Поэтому это кнопка + всплывающий список.            */
@@ -1212,6 +1216,10 @@ var ICONS = {
     code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
     broom: '<path d="M19 3l-6.5 6.5"/><path d="M14 12l-3.5 3.5"/>' +
       '<path d="M13.5 10.5a5 5 0 0 1-7 7l-3.5-3.5a5 5 0 0 1 7-7z"/>',
+    /* «Сбросить» — корзина: прежний веник читался как непонятная загогулина */
+    trash: '<polyline points="3 6 21 6"/><path d="M8 6V4h8v2"/>' +
+      '<path d="M6 6l1 14h10l1-14"/><line x1="10" y1="11" x2="10" y2="17"/>' +
+      '<line x1="14" y1="11" x2="14" y2="17"/>',
     /* иконки моделей: у каждой модели свой значок в списке выбора */
     bolt: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
     chip: '<rect x="6" y="6" width="12" height="12" rx="2"/>' +
@@ -1807,7 +1815,6 @@ async function jobCollect(ctx, target) {
   var aiBusy = false;
   var aiLast = 0;
   var aiAnswer = null;                 /* { key, text, at, model, kind } */
-  var aiVia = '';                      /* чем решилось в прошлый раз — показываем в окне */
   var AI_KEY = 'aiAnswer';
 
   try { aiAnswer = JSON.parse(GM_getValue(AI_KEY, 'null')); } catch (e) { aiAnswer = null; }
@@ -2172,14 +2179,25 @@ async function jobCollect(ctx, target) {
   }
 
   /* Системный текст держим коротким: он уходит в каждый запрос, и каждое лишнее
-     предложение здесь — это лишнее время ответа. Правила оставлены, вода убрана. */
+     предложение здесь — это лишнее время ответа. Правила оставлены, вода убрана.
+
+     Запретный список появился после разбора: на задании про среднее арифметическое
+     модель принесла `import sys`, `def main()`, `if __name__ == "__main__"` и
+     f-строку `f"{res:.15g}"` — ни одной из этих вещей в уроке ещё не было. Простое
+     «держитесь уровня урока» модель игнорирует, поэтому здесь перечислено прямо.   */
   function aiSystem() {
     return 'Реши задание со Stepik. Верни ТОЛЬКО ответ: без пояснений, без markdown, ' +
       'без ``` и без строки с названием языка. Код — целиком, одним куском. ' +
       'Ввод и вывод через stdin → stdout; строки могут содержать кириллицу и пробелы.\n' +
-      '1. Держись уровня урока: не используй то, чего в его теории ещё не было.\n' +
-      '2. Прогони код по тестовым данным из условия и сверь вывод с ожидаемым.\n' +
-      '3. Формат вывода — ровно как в «выходных данных»: те же пробелы и переводы строк.';
+      '1. Пиши ровно тем, что уже было в уроке, и не сложнее. Запрещено: import ' +
+      '(в том числе sys, os, math), любые модули, классы, лямбды, генераторы, ' +
+      'списковые включения, f-строки, def main(), if __name__ == "__main__", ' +
+      'try/except. Ввод — только input(), вывод — только print().\n' +
+      '2. Решение — короткое: несколько строк, без лишних функций и проверок.\n' +
+      '3. Прогони код по тестовым данным из условия и сверь вывод с ожидаемым.\n' +
+      '4. Вывод — ровно как в «выходных данных», символ в символ: 2 и 2.0 — разные ' +
+      'ответы. Если в «выходе» целое число, а деление дало дробь, выведи целое: ' +
+      'посчитай результат и, если он равен своей целой части, напечатай целое.';
   }
 
   /* Блок «где мы и что уже проходили» — общий и для первого ответа, и для правки:
@@ -2242,10 +2260,11 @@ async function jobCollect(ctx, target) {
     if (!ctx || !ctx.checkError) {
       if (hasSamples) {
         base += '\n\nПроверь себя на «Тестовых данных»: выполни код на каждой строке\n' +
-          'и сверь вывод с «выходом». Не сошлось — исправь. В ответ — только код.';
+          'и сверь вывод с «выходом». Не сошлось — исправь. В ответ — только код.\n' +
+          'И помни: без import и без конструкций, которых в уроке не было.';
       } else {
         base += '\n\nПеречитай условие: решение должно делать ровно то, что просят,\n' +
-          'и не использовать непройденных конструкций.';
+          'и обходиться тем, что уже проходили, — без import и лишних конструкций.';
       }
     }
     return base;
@@ -2297,12 +2316,6 @@ async function jobCollect(ctx, target) {
       if (Date.now() - started > t) return '';
       await sleep(500);
     }
-  }
-
-  /* Чем решали — показываем человеку: он должен понимать, какой канал сработал. */
-  function aiViaText() {
-    var ch = AI_CHANNELS.filter(function (c) { return c.id === aiVia; })[0];
-    return ch ? ch.label : '';
   }
 
   /* Человеку нужно понять, что делать, а не «HTTP 402». */
@@ -2392,7 +2405,6 @@ async function jobCollect(ctx, target) {
       try {
         var got = await askChannel(ch, null, system, user, mode);
         markAi(ch.id);
-        aiVia = ch.id;
         return got;
       } catch (e) {
         markAi(ch.id);             /* при ошибке тоже не долбим сервис */
@@ -2437,7 +2449,12 @@ async function jobCollect(ctx, target) {
       aiLogClear();
       aiLogAdd('шаг ' + ctx.step + ' · ' + langLabel(stepLanguage()), 'sys');
     }
-    var thinking = aiLogThink(fixed ? 'ИИ правит решение по ошибке теста' : 'ИИ думает и проверяет себя');
+    /* В индикаторе — короткая строка о том, чем ИИ занят СЕЙЧАС. Общие
+       «думает…» ничего не говорят: человек должен видеть, что происходит
+       именно с его шагом. Одна строка, без подробностей.                      */
+    var thinking = aiLogThink(fixed
+      ? 'ИИ ищет ошибку в тесте…'
+      : 'ИИ пишет решение…');
 
     try {
       var got = await aiCall(aiSystem(), aiUserFor(ctx), { retry: !fixed });
@@ -2509,8 +2526,7 @@ async function jobCollect(ctx, target) {
 
     aiFixTried[ctx.key] = (aiFixTried[ctx.key] || 0) + 1;
     var prev = aiAnswer.text;
-    var was = aiVia;
-    aiLogAdd(err, 'err');
+    aiLogReport(err);
     aiLogAdd('пробую исправить сам…', 'sys');
 
     var fixCtx = Object.assign({}, ctx);
@@ -2532,7 +2548,6 @@ async function jobCollect(ctx, target) {
     };
     saveAi();
     aiLogAnswer();
-    aiVia = was;                        /* чем решали в итоге — показываем то же */
     renderPanel(true);
 
     /* Правку показываем только в ленте, но в панели уже стоит новое решение:
@@ -2593,6 +2608,40 @@ async function jobCollect(ctx, target) {
     return { kind: 'choice', answers: answers, ids: ids, source: 'ии' };
   }
 
+  /* После неудачной отправки Stepik убирает редактор и показывает разбор —
+     вернуть редактор можно ТОЛЬКО кнопкой «Изменить решение». Без этого шага
+     вставлять исправленный код некуда: скрипт честно писал «вставить некуда»
+     и «кнопку «Запустить код» не нашёл», хотя дело было именно в скрытом
+     редакторе.                                                                 */
+  var EDIT_RE = /^(?:изменить решение|изменить|редактировать|изменить ответ|edit solution|edit|rework)$/i;
+
+  function editButton() {
+    var nodes = $$('button, [role="button"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var text = norm(nodes[i].textContent);
+      if (!text || !EDIT_RE.test(text)) continue;
+      var r = nodes[i].getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      if (nodes[i].disabled) continue;
+      return nodes[i];
+    }
+    return null;
+  }
+
+  function editorField() {
+    return $('.CodeMirror, .cm-content, .attempt-wrapper__plugin textarea');
+  }
+
+  /* Вернуть редактор на место, если Stepik его спрятал после проверки. */
+  async function revealEditor() {
+    var btn = editButton();
+    if (!btn) return true;                  /* кнопки нет — редактор и так на месте */
+    try { btn.click(); } catch (e) { /* ignore */ }
+    await sleep(500);
+    await waitFor(function () { return !editButton(); }, 6000, 250);
+    return !editButton();
+  }
+
   /* После ответа ИИ вставляем решение в редактор сами и жмём «Запустить код» —
      человек сразу видит результат, а не переносит код руками.
      «Отправить на проверку» при этом НЕ нажимаем: отправка — это решение
@@ -2609,6 +2658,10 @@ async function jobCollect(ctx, target) {
       aiLogAdd('вставлять нечего: в ответе размышления, а не решение — смени модель', 'sys');
       return { skipped: 'размышления вместо ответа' };
     }
+
+    /* После неудачной отправки Stepik прячет редактор за разбором — сначала
+       возвращаем его кнопкой «Изменить решение», иначе вставлять некуда.      */
+    await revealEditor();
 
     /* карточка задания дорисовывается не сразу — даём ей шанс появиться */
     if (!insertTarget()) await waitFor(insertTarget, 6000, 250);
@@ -2635,9 +2688,14 @@ async function jobCollect(ctx, target) {
 
     /* Кнопка запуска появляется вместе с редактором, поэтому ждём её, а не
        жмём сразу: у только что вставленного кода Stepik может ещё не успеть
-       разбудить панель запуска.                                               */
+       разбудить панель запуска. Если её всё равно нет — возможно, Stepik снова
+       показал разбор, и редактор опять спрятан: пробуем вернуть его ещё раз.   */
     await sleep(400);
     var btn = await waitFor(runButton, 4000, 250);
+    if (!btn && editButton()) {
+      await revealEditor();
+      btn = await waitFor(runButton, 4000, 250);
+    }
     if (!btn) {
       aiLogAdd('кнопку «Запустить код» не нашёл — запусти сам', 'sys');
       return { inserted: true, ran: false };
@@ -2782,6 +2840,54 @@ async function jobCollect(ctx, target) {
     return el;
   }
 
+  /* Отчёт проверки приходит ОДНОЙ строкой:
+       «[+] Test #1. OK [ ] Test #2. Wrong answer … 2 of 5 test(s) passed.»
+     Читать её целиком бесполезно — глаз должен сразу цепляться за провалы.
+     Поэтому разбираем отчёт на отметки тестов и красим каждую: пройденные
+     обычным, проваленные — красным.                                            */
+  function reportLine(text, kind) {
+    var d = document.createElement('div');
+    d.className = 'sgx-ai-repline ' + kind;
+    d.textContent = text;
+    return d;
+  }
+
+  function aiLogReport(text) {
+    var log = aiLogEl();
+    if (!log || !text) return null;
+    var src = String(text);
+    var wrap = document.createElement('div');
+    wrap.className = 'sgx-ai-msg sgx-ai-report';
+
+    var re = /(\[\+\]|\[\s*\])([^\[]*)/g;
+    var m, last = 0, marks = 0;
+    while ((m = re.exec(src)) !== null) {
+      marks++;
+      if (m.index > last) {
+        var pre = src.slice(last, m.index).trim();
+        if (pre) wrap.appendChild(reportLine(pre, 'note'));
+      }
+      var ok = m[1] === '[+]';
+      wrap.appendChild(reportLine((ok ? '[+] ' : '[ ] ') + m[2].trim(), ok ? 'ok' : 'bad'));
+      last = m.index + m[0].length;
+    }
+    var tail = src.slice(last).trim();
+    if (tail) wrap.appendChild(reportLine(tail, 'note'));
+
+    /* отметок не было — значит это разбор одной ошибки; красим по признакам */
+    if (!marks) {
+      src.split('\n').forEach(function (line) {
+        if (!line.trim()) return;
+        wrap.appendChild(reportLine(line,
+          /wrong|failed|error|неверн|ошибк|превыш/i.test(line) ? 'bad' : 'note'));
+      });
+    }
+
+    log.appendChild(wrap);
+    log.scrollTop = log.scrollHeight;
+    return wrap;
+  }
+
   /* индикатор «думает» — чтобы было видно, что скрипт жив, а не завис.
      Со счётчиком секунд: «думает» без цифр выглядит одинаково и на второй
      секунде, и на второй минуте, и человек не понимает, идёт работа или нет.   */
@@ -2842,18 +2948,16 @@ async function jobCollect(ctx, target) {
     else if (window.prompt) window.prompt('Скопируй решение:', s);
   }
 
-  /* Показать готовое решение в ленте — с подписью, чем решено и на каком языке. */
+  /* Показать готовое решение в ленте. Никаких подписей «свой ключ» и названий
+     моделей: это служебные подробности скрипта, человеку их знать не нужно,
+     а ленту они засоряют. Модель и так видна в шапке блока.                    */
   function aiLogAnswer() {
     if (!aiAnswer || !aiAnswer.text) return;
     aiLogAdd(aiAnswer.text, '', true);
     if (aiAnswer.truncated) {
       aiLogAdd('⚠ ответ неполный — оборвался по лимиту. Это не решение целиком:\n' +
         'нажми «Спросить ИИ» ещё раз или выбери другую модель.', 'err');
-    } else {
-      aiLogAdd('проверь перед отправкой · ' + (aiViaText() ? aiViaText() + ' · ' : '') + aiAnswer.model, 'sys');
     }
-    var lang = document.getElementById('sgx-ai-lang');
-    if (lang) lang.textContent = langLabel(aiAnswer.lang || '');
   }
 
   function aiAnswerAt(key) {
@@ -3195,7 +3299,8 @@ async function jobCollect(ctx, target) {
          Stepik рядом и путало — тут не редактор, а помощник.                    */
       '<ul class="sgx-ai-tabs"><li class="sgx-ai-tab active">' + icon('spark', 18) + 'ИИ</li></ul>',
       '<div class="sgx-ai-tools">',
-      '<span class="sgx-ai-lang" id="sgx-ai-lang">ИИ</span>',
+      /* Метки языка здесь нет: он и так написан рядом самим Stepik («Python 3.6»),
+         а чип показывал то «ИИ», то «Python» и только путал.                    */
       /* Модель меняется здесь же, рядом с решением. Это свой список, а не родной
          <select>: в родном нельзя показать значок модели слева и её «ум» справа. */
       '<div class="sgx-ai-mwrap">',
@@ -3207,7 +3312,7 @@ async function jobCollect(ctx, target) {
       '<ul class="sgx-ai-models" id="sgx-ai-models"></ul>',
       '</div>',
       '<button class="sgx-ai-tool" id="sgx-ai-reset" type="button" title="Сбросить">' +
-      icon('broom', 18) + '</button>',
+      icon('trash', 18) + '</button>',
       '</div></div>',
       '<div class="sgx-ai-log" id="sgx-ai-log"></div>',
       '</div>'

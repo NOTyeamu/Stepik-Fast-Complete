@@ -197,14 +197,21 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
         refresh() {}, focus() {}
       };
     };
-    const submitBtn = window.document.querySelector('button.submit');
-    if (submitBtn) submitBtn.addEventListener('click', () => { state.submitted++; });
-    /* Кнопка «Запустить код» — отдельное действие: она НЕ отправляет ответ
-       на проверку, и путать её с отправкой нельзя. Считаем клики раздельно. */
-    const runBtn = window.document.querySelector('.attempt-wrapper-button_run, button.run');
-    if (runBtn) runBtn.addEventListener('click', () => { state.ran++; });
-    const retryBtn = window.document.querySelector('button.retry');
-    if (retryBtn) retryBtn.addEventListener('click', () => { state.retried++; });
+    /* Наружу: в сценарии, где Stepik пересоздаёт редактор после провала
+       («Изменить решение»), заглушку надо навесить на НОВЫЙ узел — иначе
+       вставка честно скажет «редактор для вставки не найден».                  */
+    window.__mkCm = mkCm;
+    /* Счётчики кликов — через делегирование, а не прямыми слушателями: Stepik
+       убирает и возвращает кнопки по ходу проверки («Изменить решение»), и
+       прямой слушатель на исчезнувшей кнопке уже ничего не считает.            */
+    window.document.addEventListener('click', (e) => {
+      const t = e.target && e.target.closest ? e.target.closest('button, [role="button"]') : null;
+      if (!t) return;
+      const cl = t.classList || { contains: () => false };
+      if (cl.contains('submit')) state.submitted++;
+      if (cl.contains('attempt-wrapper-button_run') || cl.contains('run')) state.ran++;
+      if (cl.contains('retry')) state.retried++;
+    });
 
     const cmNode = window.document.querySelector('.CodeMirror');
     if (cmNode) mkCm(cmNode);
@@ -296,6 +303,9 @@ function probeSandbox(html, expose, url) {
   );
   const api = window.__probe || {};
   api.close = () => { try { window.close(); } catch (e) { /* ignore */ } };
+  /* окно наружу: некоторым проверкам нужно посмотреть, что скрипт нарисовал
+     в DOM (например, какие строки отчёта он покрасил красным) */
+  api.window = window;
   return api;
 }
 
@@ -529,6 +539,71 @@ const AI_FIX_HTML = `<!doctype html><html><body>
     <button class="submit" type="button">Отправить на проверку</button>
     <div id="sgx-test-hint"></div>
   </div></div>
+</body></html>`;
+
+/* Тест с выбором варианта: ИИ отвечает текстом, а скрипт должен сопоставить
+/* Отправка не прошла, и Stepik убрал редактор, оставив разбор и кнопку
+   «Изменить решение». Вернуть редактор можно ТОЛЬКО ею — именно на этом
+   спотыкалась автовставка исправленного кода. Кнопка возвращает редактор и
+   кнопку запуска, как это делает сайт. */
+const AI_FAILED_HTML = `<!doctype html><html><body>
+  ${SHELL_HTML}
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="step-inner page-fragment">
+      <div class="html-content rich-text-viewer">
+        <span><p>Создайте метод GetAverage, который вернёт среднее трёх чисел.</p></span>
+      </div>
+    </div>
+    <div class="quiz-plugin"><div class="quiz-plugin__content" id="sgx-editor-host">
+      <div class="code-editor-quiz__editor code-quiz__code">
+        <div class="CodeMirror"><textarea></textarea></div>
+      </div>
+    </div></div>
+    <div id="sgx-run-host">
+      <button class="attempt-wrapper-button attempt-wrapper-button_run button_with-loader is-outlined has-icon" type="button">
+        <span>Запустить код</span>
+      </button>
+    </div>
+    <button class="attempt-wrapper-button submit" type="button">Отправить на проверку</button>
+    <div id="sgx-test-hint"></div>
+  </div></div>
+  <script>
+    (function () {
+      var wrap = document.querySelector('.attempt-wrapper__content');
+      /* отправка провалилась: сайт убирает редактор и показывает разбор */
+      wrap.addEventListener('click', function (e) {
+        var t = e.target.closest && e.target.closest('button');
+        if (!t || !t.classList.contains('submit')) return;
+        document.getElementById('sgx-editor-host').innerHTML = '';
+        document.getElementById('sgx-run-host').innerHTML = '';
+        var hint = document.getElementById('sgx-test-hint');
+        hint.innerHTML = '<div class="smart-hints"><div class="smart-hints__hint">' +
+          '[+] Test #1. OK [ ] Test #2. Wrong answer [ ] Test #3. Wrong answer ' +
+          '[ ] Test #4. Wrong answer [+] Test #5. OK 2 of 5 test(s) passed.<br>' +
+          'Failed test #1 of 5. Wrong answer Test input: 1 2 3 Correct output: 2 ' +
+          'Your code output: 2.0</div></div>';
+        if (document.getElementById('sgx-edit-btn')) return;
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.id = 'sgx-edit-btn';
+        b.className = 'has-icon attempt-wrapper-button';
+        b.innerHTML = '<span class="attempt-wrapper-button__icon"></span><span>Изменить решение</span>';
+        b.addEventListener('click', function () {
+          document.getElementById('sgx-editor-host').innerHTML =
+            '<div class="code-editor-quiz__editor code-quiz__code">' +
+            '<div class="CodeMirror"><textarea></textarea></div></div>';
+          document.getElementById('sgx-run-host').innerHTML =
+            '<button class="attempt-wrapper-button attempt-wrapper-button_run is-outlined" type="button">' +
+            '<span>Запустить код</span></button>';
+          /* редактор пересоздан — заглушка стенда нужна на новом узле */
+          var cm = document.querySelector('.CodeMirror');
+          if (cm && window.__mkCm) window.__mkCm(cm);
+          b.remove();
+        });
+        wrap.appendChild(b);
+      });
+    })();
+  </script>
 </body></html>`;
 
 /* Тест с выбором варианта: ИИ отвечает текстом, а скрипт должен сопоставить
@@ -1618,6 +1693,11 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
         /^ИИ$/.test(root.querySelector('.sgx-ai-tab').textContent.trim()) &&
         !!root.querySelector('.sgx-ai-tab svg'), root.querySelector('.sgx-ai-tab').textContent.trim());
       check('слова «проверяю» в блоке нет', !/проверяю/.test(root.textContent));
+      /* Чип языка убран: он показывал то «ИИ», то «Python», а язык и так написан
+         рядом самим Stepik («Python 3.6»).                                     */
+      check('чипа с языком в блоке больше нет',
+        !root.querySelector('#sgx-ai-lang') && !/sgx-ai-lang/.test(st.css || ''),
+        'чип на месте');
     }
   });
 
@@ -1732,7 +1812,7 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       check('в запросе есть название урока', /Знакомство с методами/.test(body), 'название есть');
       check('до ИИ дошла пройденная теория', /IsEven/.test(body), 'теория есть');
       check('ИИ просят держаться пройденного',
-        /не используй то, чего в его теории|Держись уровня урока/i.test(body),
+        /Пиши ровно тем, что уже было в уроке|не используй то, чего в его теории/i.test(body),
         'правило есть');
     }
   });
@@ -2013,8 +2093,8 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       const sizes = [
         ['лента', Number((/font-size:(\d+)px/.exec(msg) || [])[1] || 0)],
         ['вкладка', Number((/font-size:(\d+)px/.exec(px('#sgx-ai-panel .sgx-ai-tab')) || [])[1] || 0)],
-        ['метка языка', Number((/font-size:(\d+)px/.exec(px('#sgx-ai-panel .sgx-ai-lang')) || [])[1] || 0)],
         ['кнопка модели', Number((/font-size:(\d+)px/.exec(px('#sgx-ai-panel .sgx-ai-mbtn')) || [])[1] || 0)],
+        ['строка отчёта', Number((/font(?::|-size:)(\d+)px/.exec(px('#sgx-ai-panel .sgx-ai-report')) || [])[1] || 0)],
         ['служебная строка', Number((/font-size:(\d+)px/.exec(px('#sgx-ai-panel .sgx-ai-msg.sys')) || [])[1] || 0)]
       ];
       const over = sizes.filter((s) => s[1] > codeSize);
@@ -2133,9 +2213,9 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       check('кнопка-иконка берёт высоту из шкалы',
         /width:var\(--sgx-ctl\)/.test(rule('#sgx-ai-panel .sgx-ai-tool')),
         rule('#sgx-ai-panel .sgx-ai-tool'));
-      check('метка языка той же высоты, что кнопки',
-        /height:var\(--sgx-ctl\)/.test(rule('#sgx-ai-panel .sgx-ai-lang')),
-        rule('#sgx-ai-panel .sgx-ai-lang'));
+      check('кнопка сброса той же высоты, что остальные',
+        /height:var\(--sgx-ctl\)/.test(rule('#sgx-ai-panel .sgx-ai-tool')),
+        rule('#sgx-ai-panel .sgx-ai-tool'));
       check('кнопка выбора модели той же высоты',
         /height:var\(--sgx-ctl\)/.test(rule('#sgx-ai-panel .sgx-ai-mbtn')),
         rule('#sgx-ai-panel .sgx-ai-mbtn'));
@@ -2203,7 +2283,7 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       const system = (body.messages || [])[0] || {};
       const user = (body.messages || [])[1] || {};
       const total = String(system.content || '').length + String(user.content || '').length;
-      check('системный текст короткий', String(system.content || '').length < 700,
+      check('системный текст не разросся', String(system.content || '').length < 1000,
         'символов: ' + String(system.content || '').length);
       check('весь запрос укладывается в разумный размер', total < 4000,
         'символов: ' + total);
@@ -2334,6 +2414,196 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
         Object.keys(st.inbox).join(',') || 'пусто');
       check('в ленте сказано, что это размышления',
         /размышлени/i.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 140));
+    }
+  });
+
+  /* --- 56. отчёт о тестах подсвечен: провалы красным --------------------- */
+  console.log('\n=== 56. проваленные тесты выделены, пройденные — нет ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['aiLogReport', 'ensureAiRoot', 'aiSlot'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    probe.ensureAiRoot();
+    probe.aiSlot();
+    const report =
+      '[+] Test #1. OK [ ] Test #2. Wrong answer [ ] Test #3. Wrong answer ' +
+      '[ ] Test #4. Wrong answer [+] Test #5. OK 2 of 5 test(s) passed.';
+    probe.aiLogReport(report);
+    const lines = Array.from(probe.window.document.querySelectorAll('#sgx-ai-log .sgx-ai-repline'))
+      .map((el) => ({
+        kind: el.classList.contains('bad') ? 'bad'
+          : (el.classList.contains('ok') ? 'ok' : 'note'),
+        text: el.textContent
+      }));
+    probe.close();
+    check('отчёт разобран на отметки тестов', !!lines, 'нет разбора');
+    if (lines) {
+      check('провалов помечено три', lines.filter((l) => l.kind === 'bad').length === 3,
+        lines.map((l) => l.kind).join(','));
+      check('пройденных помечено два', lines.filter((l) => l.kind === 'ok').length === 2,
+        lines.map((l) => l.kind).join(','));
+      check('провальный тест назван красным классом',
+        lines.some((l) => l.kind === 'bad' && /Wrong answer/.test(l.text)),
+        lines.map((l) => l.text).join(' | ').slice(0, 80));
+      check('итог «2 of 5» остался виден',
+        lines.some((l) => /2 of 5/.test(l.text)), lines.map((l) => l.text).join(' | ').slice(0, 80));
+    }
+  }
+
+  console.log('\n=== 56a. разбор одной ошибки тоже выделяется ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['aiLogReport', 'ensureAiRoot', 'aiSlot'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    probe.ensureAiRoot();
+    probe.aiSlot();
+    probe.aiLogReport('Failed test #1 of 5. Wrong answer\nTest input: 1 2 3\nCorrect output: 2\nYour code output: 2.0');
+    const lines = Array.from(probe.window.document.querySelectorAll('#sgx-ai-log .sgx-ai-repline'))
+      .map((el) => ({
+        kind: el.classList.contains('bad') ? 'bad'
+          : (el.classList.contains('ok') ? 'ok' : 'note'),
+        text: el.textContent
+      }));
+    probe.close();
+    check('строка с провалом помечена красным',
+      !!lines && lines.some((l) => l.kind === 'bad' && /Failed test/.test(l.text)),
+      lines ? lines.map((l) => l.kind).join(',') : 'нет разбора');
+    check('подробности входа-выхода видны',
+      !!lines && lines.some((l) => /Correct output/.test(l.text)),
+      lines ? lines.map((l) => l.text).join(' | ').slice(0, 70) : 'нет разбора');
+  }
+
+  /* --- 57. после провала редактор возвращает «Изменить решение» ---------- */
+  console.log('\n=== 57. редактор возвращается кнопкой «Изменить решение» ===');
+  {
+    const probe = probeSandbox(AI_FAILED_HTML, ['editButton', 'editorField', 'revealEditor'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    const before = !!probe.editorField();
+    check('до провала редактор на месте', before, 'редактора нет');
+    check('кнопки «Изменить решение» ещё нет', !probe.editButton(), 'кнопка уже есть');
+    probe.close();
+  }
+
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: AI_FAILED_HTML, waitMs: 20000, cmMode: 'text/x-python',
+    aiPaidQueue: [
+      'def GetAverage(a, b, c):\n    return (a + b + c) / 3\n\na = float(input())\nb = float(input())\nc = float(input())\nprint(GetAverage(a, b, c))\n',
+      'def GetAverage(a, b, c):\n    return (a + b + c) / 3\n\na = float(input())\nb = float(input())\nc = float(input())\nr = GetAverage(a, b, c)\nif r == int(r):\n    print(int(r))\nelse:\n    print(r)\n'
+    ],
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+      check('первое решение вставлено и запущено', st.ran === 1, 'запусков: ' + st.ran);
+
+      /* отправляем на проверку — сайт уберёт редактор и покажет разбор */
+      const sub = win.document.querySelector('button.submit');
+      if (sub) sub.click();
+      await new Promise((r) => setTimeout(r, 9000));
+
+      check('на проверку отправлено', st.submitted === 1, 'кликов: ' + st.submitted);
+      /* Кнопку «Изменить решение» скрипт нажимает сам и она исчезает — поэтому
+         проверяем не её наличие, а то, что редактор вернулся и код лёг в него. */
+      check('редактор вернулся на страницу',
+        !!win.document.querySelector('.quiz-plugin__content .CodeMirror'), 'редактора нет');
+      check('сделана вторая попытка у ИИ', st.aiPaidCalls.length >= 2,
+        'запросов: ' + st.aiPaidCalls.length);
+      check('отчёт о провале показан в ленте',
+        /Wrong answer|Failed test/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 100));
+      check('провалы подсвечены красным',
+        !!win.document.querySelector('#sgx-ai-log .sgx-ai-repline.bad'),
+        'красных строк нет');
+      check('«Изменить решение» нажата — кнопки больше нет',
+        !win.document.querySelector('#sgx-edit-btn'), 'кнопка осталась');
+      check('исправленный код вернулся в редактор',
+        /int\(r\)/.test(st.setValue || ''), JSON.stringify((st.setValue || '').slice(0, 80)));
+      check('исправленный код запущен', st.ran === 2, 'запусков: ' + st.ran);
+    }
+  });
+
+  /* --- 58. в ленте нет служебных подписей --------------------------------- */
+  console.log('\n=== 58. «свой ключ» и «проверь перед отправкой» в ленте не показываем ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3500));
+      const feed = aiFeedText(win, st);
+      check('подписи «проверь перед отправкой» нет', !/проверь перед отправкой/i.test(feed),
+        feed.slice(0, 90));
+      check('«свой ключ» в ленте не упоминается', !/свой ключ/i.test(feed), feed.slice(0, 90));
+      check('название модели в ленту не дублируется', !/glm-5\.3-flash/i.test(feed),
+        feed.slice(0, 90));
+      check('сам код в ленте остался', /n % 2 == 0/.test(feed), feed.slice(0, 90));
+    }
+  });
+
+  /* --- 59. иконка сброса — корзина, и она работает ------------------------ */
+  console.log('\n=== 59. кнопка сброса перерисована и работает ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3000));
+      const reset = win.document.querySelector('#sgx-ai-reset');
+      check('кнопка сброса есть', !!reset, 'кнопки нет');
+      check('в кнопке сброса нарисована корзина, а не веник',
+        !!reset && /polyline points="3 6 21 6"/.test(reset.innerHTML),
+        reset ? reset.innerHTML.slice(0, 80) : '—');
+      check('значок крупный', !!reset && /width="18"/.test(reset.innerHTML),
+        reset ? reset.innerHTML.slice(0, 60) : '—');
+
+      reset.click();
+      await new Promise((r) => setTimeout(r, 300));
+      check('нажатие сброса прячет блок',
+        !win.document.querySelector('#sgx-ai-root.on'), 'блок остался видимым');
+      check('лента очищена', !/n % 2 == 0/.test(aiFeedText(win, st)), 'текст остался');
+    }
+  });
+
+  /* --- 60. индикатор говорит, чем ИИ занят сейчас ------------------------- */
+  console.log('\n=== 60. «думает» подписано по делу, одной строкой ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n', aiDelay: 4000,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+      const think = win.document.querySelector('#sgx-ai-log .sgx-ai-think');
+      check('индикатор на месте', !!think, 'индикатора нет');
+      const text = think ? think.textContent : '';
+      check('сказано, что ИИ пишет решение', /пишет решение/i.test(text), text);
+      check('подпись короткая — одна строка', text.replace(/\s+/g, ' ').length < 60, text);
+      check('счётчик секунд рядом', !!think && !!think.querySelector('.sgx-ai-secs'),
+        text);
+    }
+  });
+
+  /* --- 61. промпт прямо запрещает import и всё непройденное --------------- */
+  console.log('\n=== 61. модель просят обходиться без import и лишних конструкций ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+      const body = (st.aiPaidCalls[0] && st.aiPaidCalls[0].body) || '';
+      check('import прямо запрещён', /Запрещено: import/.test(body), 'запрета нет');
+      check('перечислены sys, os, math', /sys, os, math/.test(body), 'нет перечисления');
+      check('запрещены f-строки и def main',
+        /f-строки/.test(body) && /def main\(\)/.test(body), 'нет запрета');
+      /* тело запроса — JSON, поэтому кавычки в нём экранированы */
+      check('запрещён if __name__', /if __name__ == \\"__main__\\"/.test(body), 'нет запрета');
+      check('сказано, что ввод — только input()', /только input\(\)/.test(body), 'нет правила');
+      check('про формат вывода сказано прямо',
+        /2 и 2\.0 — разные/.test(body), 'нет правила о формате');
+      check('решение просят короткое', /Решени[ея] — короткое/.test(body), 'нет правила');
+      check('в пользовательском тексте тоже есть напоминание',
+        /без import/.test(body), 'нет напоминания');
     }
   });
 
