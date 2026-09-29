@@ -744,6 +744,11 @@
   "ext": "py",
   "kind": "code"
  },
+ "l1812981_s2": {
+  "file": "l1812981_s2.json",
+  "ext": "json",
+  "kind": "choice"
+ },
  "l1812981_s8": {
   "file": "l1812981_s8.py",
   "ext": "py",
