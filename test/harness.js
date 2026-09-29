@@ -1257,11 +1257,13 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
   console.log('\n=== 25. ИИ недоступен → сказано внятно, ничего не сломано ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    store: {}, submissions: [], html: AI_HTML, waitMs: 10000,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 12000,
     aiPaidDown: true,
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
-      await new Promise((r) => setTimeout(r, 5000));
+      /* при сбое сервиса скрипт пробует выбранную модель и одну запасную по два
+         раза с паузами — это около трёх секунд, и только потом говорит ошибку */
+      await new Promise((r) => setTimeout(r, 6500));
       const status = statusText(win);
       check('сказано, что ИИ не ответил', /ИИ не ответил/.test(status), status);
       check('старое окно с решением не открылось', !win.document.querySelector('#sgx-ai'));
@@ -1337,11 +1339,11 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
   console.log('\n=== 29. ИИ молчит → понятное объяснение, а не «HTTP 500» ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    store: {}, submissions: [], html: AI_HTML, waitMs: 8000,
+    store: {}, submissions: [], html: AI_HTML, waitMs: 12000,
     aiPaidDown: true,
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
-      await new Promise((r) => setTimeout(r, 5000));
+      await new Promise((r) => setTimeout(r, 6500));
       const status = statusText(win);
       check('сказано, что сервис недоступен', /недоступен|HTTP 500|500/.test(status), status);
       check('старое окно не открылось', !win.document.querySelector('#sgx-ai'));
@@ -1612,8 +1614,10 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
         host ? host.className : 'нет контейнера');
       check('в блоке ИИ нет настроек «от и до»',
         !/Пройти и отправить/.test((root || {}).textContent || ''), 'чисто');
-      check('вкладка называется «Код», как в редакторе сайта',
-        /Код/.test((root || {}).textContent || ''), 'вкладка есть');
+      check('вкладка названа «ИИ» со значком искры, а не «Код»',
+        /^ИИ$/.test(root.querySelector('.sgx-ai-tab').textContent.trim()) &&
+        !!root.querySelector('.sgx-ai-tab svg'), root.querySelector('.sgx-ai-tab').textContent.trim());
+      check('слова «проверяю» в блоке нет', !/проверяю/.test(root.textContent));
     }
   });
 
@@ -1844,7 +1848,9 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
     }
   });
 
-  /* --- 46. модель выбирается прямо в блоке ИИ ------------------------------- */
+  /* --- 46. модель выбирается прямо в блоке ИИ -------------------------------
+     Список свой, а не родной <select>: в родном не показать значок модели слева
+     и её «ум» справа, а человек просил именно это.                           */
   console.log('\n=== 46. модель переключается из блока рядом с редактором ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
@@ -1854,18 +1860,36 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       st.menu['✨ ИИ: решить текущий шаг']();
       await new Promise((r) => setTimeout(r, 2000));
 
-      const sel = win.document.querySelector('#sgx-ai-model');
-      check('в блоке ИИ есть выбор модели', !!sel, 'селекта нет');
-      check('в списке обе модели канала',
-        sel && sel.options.length === 2 &&
-        Array.from(sel.options).map((o) => o.value).join(',') === 'glm-5.3-flash,deepseek-v4-flash',
-        sel ? Array.from(sel.options).map((o) => o.value).join(',') : '—');
-      check('по умолчанию выбрана первая модель', sel && sel.value === 'glm-5.3-flash',
-        sel ? sel.value : '—');
+      const btn = win.document.querySelector('#sgx-ai-mbtn');
+      const list = win.document.querySelector('#sgx-ai-models');
+      check('в блоке ИИ есть выбор модели', !!btn && !!list, 'органа выбора нет');
+      const rows = list ? Array.from(list.querySelectorAll('li[data-model]')) : [];
+      check('в списке четыре модели', rows.length === 4, 'строк: ' + rows.length);
+      check('в списке есть заточенная под код модель',
+        rows.some((li) => li.getAttribute('data-model') === 'kimi-k2.7-code'),
+        rows.map((li) => li.getAttribute('data-model')).join(','));
+      check('в списке есть самая сильная модель',
+        rows.some((li) => li.getAttribute('data-model') === 'deepseek-v4-pro'),
+        rows.map((li) => li.getAttribute('data-model')).join(','));
+      check('по умолчанию выбрана первая модель',
+        btn && /GLM 5\.3 Flash/.test(btn.textContent), btn ? btn.textContent.trim() : '—');
+
+      /* список открывается по кнопке */
+      check('список закрыт, пока его не открыли',
+        list && !list.classList.contains('on'));
+      btn.click();
+      check('кнопка открывает список', list.classList.contains('on'));
+      btn.click();
+      check('повторное нажатие закрывает', !list.classList.contains('on'));
 
       /* переключаем и просим снова — в теле запроса должно быть новое имя */
-      sel.value = 'deepseek-v4-flash';
-      sel.dispatchEvent(new win.Event('change', { bubbles: true }));
+      btn.click();
+      const want = list.querySelector('li[data-model="deepseek-v4-flash"]');
+      check('строка нужной модели есть в списке', !!want);
+      if (want) want.click();
+      check('список закрылся после выбора', !list.classList.contains('on'));
+      check('подпись кнопки сменилась на выбранную модель',
+        /DeepSeek V4 Flash/.test(btn.textContent), btn.textContent.trim());
       check('выбор сохранён в настройках', st.storage.aiModel === 'deepseek-v4-flash',
         String(st.storage.aiModel));
 
@@ -1880,6 +1904,37 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
     }
   });
 
+  /* --- 46в. у каждой модели свой лимит ответа ------------------------------ */
+  console.log('\n=== 46в. сильным моделям дан больший лимит ответа ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 8000, cmMode: 'text/x-python',
+    aiModel: 'deepseek-v4-pro', aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+      const body = JSON.parse((st.aiPaidCalls[0] || {}).body || '{}');
+      check('сильной модели ушёл увеличенный лимит', body.max_tokens === 40000,
+        String(body.max_tokens));
+      check('лимит прежних 4000 больше не используется', body.max_tokens !== 4000,
+        String(body.max_tokens));
+    }
+  });
+
+  console.log('\n=== 46г. слабой модели лимит не раздувают ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 8000, cmMode: 'text/x-python',
+    aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+      const body = JSON.parse((st.aiPaidCalls[0] || {}).body || '{}');
+      check('быстрой модели ушёл скромный лимит', body.max_tokens === 8000,
+        String(body.max_tokens));
+    }
+  });
+
   console.log('\n=== 46a. сохранённая модель подхватывается при следующем запуске ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
@@ -1888,9 +1943,9 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
       await new Promise((r) => setTimeout(r, 2000));
-      const sel = win.document.querySelector('#sgx-ai-model');
-      check('селект показывает сохранённую модель', sel && sel.value === 'deepseek-v4-flash',
-        sel ? sel.value : '—');
+      const btn = win.document.querySelector('#sgx-ai-mbtn');
+      check('кнопка показывает сохранённую модель',
+        btn && /DeepSeek V4 Flash/.test(btn.textContent), btn ? btn.textContent.trim() : '—');
       const sent = st.aiPaidCalls[0] ? JSON.parse(st.aiPaidCalls[0].body).model : '';
       check('запрос пошёл на сохранённую модель', sent === 'deepseek-v4-flash', sent || 'нет');
     }
@@ -1906,9 +1961,9 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       await new Promise((r) => setTimeout(r, 2000));
       const sent = st.aiPaidCalls[0] ? JSON.parse(st.aiPaidCalls[0].body).model : '';
       check('незнакомое имя заменено на рабочую модель', sent === 'glm-5.3-flash', sent || 'нет');
-      const sel = win.document.querySelector('#sgx-ai-model');
-      check('селект тоже показывает рабочую модель', sel && sel.value === 'glm-5.3-flash',
-        sel ? sel.value : '—');
+      const btn = win.document.querySelector('#sgx-ai-mbtn');
+      check('кнопка тоже показывает рабочую модель',
+        btn && /GLM 5\.3 Flash/.test(btn.textContent), btn ? btn.textContent.trim() : '—');
     }
   });
 
@@ -1948,27 +2003,52 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
 
       const code = px('#sgx-ai-panel .sgx-ai-code');
       check('код тёмным по светлому, а не наоборот', /color:#1F1D1B/i.test(code), code);
-      check('шрифт кода не меньше 14px', /font:14px/.test(code), code);
+      check('шрифт кода не меньше 16px', /font:16px/.test(code), code);
 
       const msg = px('#sgx-ai-panel .sgx-ai-msg');
-      check('шрифт ленты не меньше 15px', /font-size:15px/.test(msg), msg);
+      check('шрифт ленты не меньше 16px', /font-size:16px/.test(msg), msg);
+      /* потолок: крупнее кода не делаем ничего — иначе решение перестаёт
+         читаться как код */
+      const codeSize = Number((/font:(\d+)px/.exec(code) || [])[1] || 0);
+      const sizes = [
+        ['лента', Number((/font-size:(\d+)px/.exec(msg) || [])[1] || 0)],
+        ['вкладка', Number((/font-size:(\d+)px/.exec(px('#sgx-ai-panel .sgx-ai-tab')) || [])[1] || 0)],
+        ['метка языка', Number((/font-size:(\d+)px/.exec(px('#sgx-ai-panel .sgx-ai-lang')) || [])[1] || 0)],
+        ['кнопка модели', Number((/font-size:(\d+)px/.exec(px('#sgx-ai-panel .sgx-ai-mbtn')) || [])[1] || 0)],
+        ['служебная строка', Number((/font-size:(\d+)px/.exec(px('#sgx-ai-panel .sgx-ai-msg.sys')) || [])[1] || 0)]
+      ];
+      const over = sizes.filter((s) => s[1] > codeSize);
+      check('ни один шрифт не крупнее кода', over.length === 0,
+        'код ' + codeSize + 'px; крупнее: ' + over.map((s) => s[0] + ' ' + s[1]).join(', '));
+      check('все размеры вообще распознались', sizes.every((s) => s[1] > 0),
+        sizes.map((s) => s[0] + '=' + s[1]).join(', '));
 
       const tab = px('#sgx-ai-panel .sgx-ai-tab');
-      check('шрифт вкладки не меньше 15px', /font-size:15px/.test(tab), tab);
+      check('шрифт вкладки не меньше 16px', /font-size:16px/.test(tab), tab);
       check('активная вкладка белая, как у Stepik',
         /background:#fff/i.test(rule('#sgx-ai-panel .sgx-ai-tab.active')),
         rule('#sgx-ai-panel .sgx-ai-tab.active'));
 
       /* шрифты подняты и в остальных местах — человек просил «везде» */
-      check('шрифт панели не меньше 15px', /font:15px/.test(px('#sgx-panel')), px('#sgx-panel'));
-      check('шрифт статуса не меньше 14px', /font-size:14px/.test(px('#sgx-panel .sgx-status')),
+      check('шрифт панели не меньше 16px', /font:16px/.test(px('#sgx-panel')), px('#sgx-panel'));
+      check('шрифт статуса не меньше 15px', /font-size:15px/.test(px('#sgx-panel .sgx-status')),
         px('#sgx-panel .sgx-status'));
       check('шрифт скобы не меньше 15px', /font:15px/.test(rule('#sgx-chip')), rule('#sgx-chip'));
       check('шрифт тоста не меньше 14px', /font:14\.5px/.test(rule('#sgx-toast')), rule('#sgx-toast'));
       check('шрифт отчёта не меньше 15px', /font:15px/.test(rule('#sgx-report')), rule('#sgx-report'));
-      check('селект модели оформлен как родной',
-        /border:1px solid #E5E5E5/.test(px('#sgx-ai-panel .sgx-ai-model')),
-        rule('#sgx-ai-panel .sgx-ai-model'));
+      check('кнопка выбора модели оформлена как родная',
+        /border:1px solid #E5E5E5/.test(px('#sgx-ai-panel .sgx-ai-mbtn')),
+        px('#sgx-ai-panel .sgx-ai-mbtn'));
+      /* поле ответа: фиксированная высота, а не max-height — иначе блок прыгает
+         при каждом ответе, а человек просил «только прокручивать» */
+      const logRule = px('#sgx-ai-panel .sgx-ai-log');
+      check('поле ответа фиксированной высоты', /(?:^|[;{])height:440px/.test(logRule), logRule);
+      check('высота поля не зависит от содержимого', !/max-height:46vh/.test(logRule), logRule);
+      check('поле ответа стало больше прежних 46vh', /height:440px/.test(logRule), logRule);
+      check('кнопки блока крупные — 40px',
+        /--sgx-ctl:40px/.test(rule('#sgx-ai-root')) &&
+        /height:var\(--sgx-ctl\)/.test(rule('#sgx-ai-panel .sgx-ai-tool')),
+        rule('#sgx-ai-panel .sgx-ai-tool'));
     }
   });
 
@@ -2035,13 +2115,15 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       check('шкала объявлена в блоке ИИ',
         /--sgx-s1:4px/.test(vars) && /--sgx-s2:8px/.test(vars) && /--sgx-s3:12px/.test(vars) &&
         /--sgx-s4:16px/.test(vars), vars.slice(0, 90));
-      check('высота органов управления задана одним числом', /--sgx-ctl:32px/.test(vars), vars.slice(0, 90));
+      check('высота органов управления задана одним числом', /--sgx-ctl:40px/.test(vars), vars.slice(0, 90));
       check('радиусы заданы шкалой',
-        /--sgx-r:8px/.test(vars) && /--sgx-r-sm:6px/.test(vars), vars.slice(0, 90));
+        /--sgx-r:10px/.test(vars) && /--sgx-r-sm:8px/.test(vars), vars.slice(0, 90));
       check('шрифты заданы шкалой',
-        /--sgx-f-xs:13px/.test(vars) && /--sgx-f-sm:14px/.test(vars) && /--sgx-f:15px/.test(vars),
+        /--sgx-f-xs:14px/.test(vars) && /--sgx-f-sm:15px/.test(vars) && /--sgx-f:16px/.test(vars),
         vars.slice(0, 120));
-      check('панель курса объявляет ту же шкалу', /--sgx-ctl:32px/.test(rule('#sgx-panel')),
+      check('размер кода объявлен отдельно — он и есть потолок',
+        /--sgx-mono:16px/.test(vars), vars.slice(0, 120));
+      check('панель курса объявляет ту же шкалу', /--sgx-ctl:40px/.test(rule('#sgx-panel')),
         rule('#sgx-panel').slice(0, 90));
 
       /* ключевые правила должны ссылаться на шкалу, а не нести свои числа */
@@ -2054,10 +2136,10 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       check('метка языка той же высоты, что кнопки',
         /height:var\(--sgx-ctl\)/.test(rule('#sgx-ai-panel .sgx-ai-lang')),
         rule('#sgx-ai-panel .sgx-ai-lang'));
-      check('селект модели той же высоты',
-        /height:var\(--sgx-ctl\)/.test(rule('#sgx-ai-panel .sgx-ai-model')),
-        rule('#sgx-ai-panel .sgx-ai-model'));
-      check('вкладка «Код» той же высоты',
+      check('кнопка выбора модели той же высоты',
+        /height:var\(--sgx-ctl\)/.test(rule('#sgx-ai-panel .sgx-ai-mbtn')),
+        rule('#sgx-ai-panel .sgx-ai-mbtn'));
+      check('вкладка «ИИ» той же высоты',
         /height:var\(--sgx-ctl\)/.test(rule('#sgx-ai-panel .sgx-ai-tab')),
         rule('#sgx-ai-panel .sgx-ai-tab'));
       check('скругления берутся из шкалы',
@@ -2115,8 +2197,9 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       const body = JSON.parse((st.aiPaidCalls[0] || {}).body || '{}');
       check('температура низкая — меньше «рассуждений»',
         typeof body.temperature === 'number' && body.temperature <= 0.3, String(body.temperature));
-      check('лимит ответа разумный, а не 8000',
-        body.max_tokens === 4000, String(body.max_tokens));
+      check('лимит ответа берётся из каталога, а не из общего числа',
+        body.max_tokens === 8000, String(body.max_tokens));
+      check('у быстрой модели лимит скромный', body.max_tokens < 40000, String(body.max_tokens));
       const system = (body.messages || [])[0] || {};
       const user = (body.messages || [])[1] || {};
       const total = String(system.content || '').length + String(user.content || '').length;
@@ -2169,6 +2252,88 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       check('код не запускался', st.ran === 0, 'кликов: ' + st.ran);
       check('в ленте объяснено, почему не вставили',
         /вставлять нечего/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 120));
+    }
+  });
+
+  /* --- 55. размышления модели не попадают в решение ------------------------
+     Ровно то, что человек прислал в лог: reasoning-модель вывалила стену
+     английского текста («We need answer only code in Python…»), а код оказался
+     в самом конце. В ленту и в хранилище должно уехать только решение.        */
+  console.log('\n=== 55. размышления модели отрезаются от ответа ===');
+  {
+    const wall =
+      'We need answer only code in Python. Need parse problem. Need understand Stepik task. ' +
+      'Let\'s think. The user says write in Python. Maybe we read three lines.\n' +
+      'So the code should be:\n```python\ndef GetAverage(a, b, c):\n' +
+      '    return (a + b + c) / 3\n\nprint(GetAverage(*map(float, input().split())))\n```';
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML,
+      ['stripFences', 'looksLikeReasoning', 'cutReasoning'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    const got = probe.stripFences(wall);
+    check('в решении остался только код', /^def GetAverage/.test(got), JSON.stringify(got.slice(0, 60)));
+    check('английской стены в решении нет', !/We need/.test(got), JSON.stringify(got.slice(0, 60)));
+    check('размышления распознаны как размышления', probe.looksLikeReasoning(wall));
+    check('в готовом решении размышлений уже нет', !probe.looksLikeReasoning(got));
+    check('код уцелел целиком', /print\(GetAverage/.test(got), JSON.stringify(got.slice(-60)));
+    probe.close();
+  }
+
+  console.log('\n=== 55a. из нескольких ограждений берётся последнее ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['stripFences'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    const two = 'Вот пример:\n```python\nprint("это пример, не ответ")\n```\n' +
+      'А вот ответ:\n```python\ndef f():\n    return 1\n```';
+    const got = probe.stripFences(two);
+    check('взято последнее ограждение, а не первое', /def f\(\)/.test(got), JSON.stringify(got));
+    check('пример из размышлений не попал в ответ', !/это пример/.test(got), JSON.stringify(got));
+
+    const plain = 'def f():\n    return 1\n\nprint(f())';
+    check('обычный ответ без ограждений не тронут', probe.stripFences(plain) === plain,
+      JSON.stringify(probe.stripFences(plain)));
+    probe.close();
+  }
+
+  console.log('\n=== 55b. размышления не уезжают в редактор и в хранилище ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'We need answer only code. Need parse. Let\'s think. Maybe we should. ' +
+      'The user says write in Python. So the code should be:\n' +
+      '```python\nn = int(input())\nprint(n % 2 == 0)\n```',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3500));
+      const feed = aiFeedText(win, st);
+      check('в ленте только код, без английской стены', !/We need/.test(feed), feed.slice(0, 100));
+      check('код в ленте есть', /n % 2 == 0/.test(feed), feed.slice(0, 100));
+      const name = Object.keys(st.inbox)[0] || '';
+      check('в хранилище уехал код, а не размышления',
+        /n % 2 == 0/.test(st.inbox[name] || '') && !/We need/.test(st.inbox[name] || ''),
+        String(st.inbox[name] || '').slice(0, 60));
+      check('в редакторе код', /n % 2 == 0/.test(st.setValue || ''),
+        JSON.stringify(st.setValue || ''));
+      check('код запущен', st.ran === 1, 'кликов: ' + st.ran);
+    }
+  });
+
+  console.log('\n=== 55c. чистая стена размышлений не вставляется и не публикуется ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'We need answer only code. Need parse the problem. Let\'s think carefully. ' +
+      'Maybe the input has three numbers. The user says write in Python. ' +
+      'So we can read all and split. Perhaps we should also check negatives. ' +
+      'Wait, the average is simple. I think we should just sum and divide.',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3500));
+      check('в редактор ничего не подставлено', st.setValue === null, JSON.stringify(st.setValue));
+      check('код не запускался', st.ran === 0, 'кликов: ' + st.ran);
+      check('в хранилище ничего не ушло', Object.keys(st.inbox).length === 0,
+        Object.keys(st.inbox).join(',') || 'пусто');
+      check('в ленте сказано, что это размышления',
+        /размышлени/i.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 140));
     }
   });
 

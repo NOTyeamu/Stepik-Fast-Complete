@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.5.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам вставляет в редактор и нажимает «Запустить код» (отправку на проверку — никогда). Обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Если тесты не прошли — ИИ прочитает ошибку и попробует исправить сам.
+// @version      6.6.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам вставляет в редактор и нажимает «Запустить код» (отправку на проверку — никогда). Модель выбирается списком со значком и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Если тесты не прошли — ИИ прочитает ошибку и попробует исправить сам.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
@@ -64,7 +64,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.5.0';
+  var VERSION = '6.6.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -814,12 +814,12 @@
     'font:14.5px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#37352F;cursor:pointer}',
     '#sgx-report button:hover{background:#F1F1EF}',
     /* --- панель живёт ВНУТРИ бокового меню курса и выглядит как его часть ---
-       Та же шкала, что и у блока ИИ: отступы 4/8/12/16, высота органов 32,
-       радиус 6/8, шрифты 13/14/15. Раньше у каждого блока были свои числа, и
+       Та же шкала, что и у блока ИИ: отступы 4/8/12/16, высота органов 40,
+       радиусы 8/10, шрифты 14/15/16. Раньше у каждого блока были свои числа, и
        рядом они выглядели как набор случайных размеров.                        */
     '#sgx-panel{--sgx-s1:4px;--sgx-s2:8px;--sgx-s3:12px;--sgx-s4:16px;',
-    '--sgx-ctl:32px;--sgx-r:8px;--sgx-r-sm:6px;',
-    '--sgx-f-xs:13px;--sgx-f-sm:14px;--sgx-f:15px;',
+    '--sgx-ctl:40px;--sgx-r:10px;--sgx-r-sm:8px;',
+    '--sgx-f-xs:14px;--sgx-f-sm:15px;--sgx-f:16px;',
     'position:relative;display:none;width:100%;box-sizing:border-box;',
     'font:var(--sgx-f)/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#fff}',
     '#sgx-panel.on{display:block}',
@@ -827,8 +827,8 @@
     '#sgx-panel .sgx-module{display:flex;align-items:center;gap:var(--sgx-s2);',
     'min-height:calc(var(--sgx-ctl) + var(--sgx-s3));padding:var(--sgx-s3) var(--sgx-s4);',
     'border-bottom:1px solid rgba(255,255,255,.08);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
-    '#sgx-panel .sgx-badge{display:flex;align-items:center;justify-content:center;width:24px;height:24px;',
-    'border-radius:50%;background:#4CAF50;color:#fff;font-size:12px;font-weight:700;flex:none}',
+    '#sgx-panel .sgx-badge{display:flex;align-items:center;justify-content:center;width:26px;height:26px;',
+    'border-radius:50%;background:#4CAF50;color:#fff;font-size:13px;font-weight:700;flex:none}',
     '#sgx-panel .sgx-modtitle{flex:1 1 auto;min-width:0;font-size:var(--sgx-f);font-weight:600;color:#fff}',
     '#sgx-panel .sgx-close{display:flex;align-items:center;justify-content:center;',
     'width:var(--sgx-ctl);height:var(--sgx-ctl);border:0;border-radius:var(--sgx-r-sm);',
@@ -844,7 +844,7 @@
     '#sgx-panel .sgx-note{padding:var(--sgx-s2) var(--sgx-s4) var(--sgx-s1);font-size:var(--sgx-f-xs);',
     'color:rgba(255,255,255,.55);line-height:1.45}',
     '#sgx-panel .sgx-btn{display:flex;align-items:center;justify-content:center;gap:var(--sgx-s2);',
-    'width:calc(100% - var(--sgx-s4) * 2);margin:0 var(--sgx-s4) var(--sgx-s2);height:38px;',
+    'width:calc(100% - var(--sgx-s4) * 2);margin:0 var(--sgx-s4) var(--sgx-s2);height:44px;',
     'border:1px solid transparent;border-radius:var(--sgx-r-sm);padding:0;',
     'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:var(--sgx-f-sm);font-weight:500;cursor:pointer;',
     'transition:background .15s ease,color .15s ease}',
@@ -867,18 +867,21 @@
     '#sgx-panel .sgx-ai[hidden]{display:none}',
     /* --- блок ИИ: живёт на месте редактора кода в карточке задания ---
        Оформлен как соседние панели Stepik («Тестовые данные», «Напишите
-       программу»): светлая карточка, серая полоса-шапка, вкладка «Код» белым
+       программу»): светлая карточка, серая полоса-шапка, вкладка «ИИ» белым
        на ней. Тёмное поле убрано: рядом с родным светлым редактором оно
        выглядело чужеродно, а мелкий шрифт на тёмном — нечитаемо.
 
        Размеры заданы ОДНОЙ шкалой (--sgx-s1…s4, --sgx-ctl, --sgx-r, --sgx-f*):
        раньше каждый блок нёс свои числа, и получалось «что-то большое, что-то
-       меньше». Шаг шкалы — 4px, всё кратно ей: отступы 4/8/12/16, высота любого
-       органа управления 32, радиус 6 у органов и 8 у карточек, шрифты 13/14/15. */
+       меньше». Шаг шкалы — 4px.
+
+       Потолок шрифта — размер кода (--sgx-mono): крупнее кода не делаем ничего,
+       иначе решение перестаёт читаться как код. Кнопки крупные (--sgx-ctl),
+       поле ответа — фиксированной высоты и только прокручивается.            */
     '#sgx-ai-root{--sgx-s1:4px;--sgx-s2:8px;--sgx-s3:12px;--sgx-s4:16px;',
-    '--sgx-ctl:32px;--sgx-r:8px;--sgx-r-sm:6px;',
-    '--sgx-f-xs:13px;--sgx-f-sm:14px;--sgx-f:15px;--sgx-mono:14px;',
-    '--sgx-bd:#E5E5E5;--sgx-bg-head:#F4F4F4;--sgx-fg:#2C2C2B;--sgx-fg-dim:#8A8880;',
+    '--sgx-ctl:40px;--sgx-r:10px;--sgx-r-sm:8px;',
+    '--sgx-f-xs:14px;--sgx-f-sm:15px;--sgx-f:16px;--sgx-mono:16px;',
+    '--sgx-bd:#E5E5E5;--sgx-bg-head:#F4F4F4;--sgx-fg:#2C2C2B;--sgx-fg-dim:#7D7B76;',
     'display:none;width:100%;box-sizing:border-box;margin:var(--sgx-s4) 0 0;',
     'border:1px solid var(--sgx-bd);border-radius:var(--sgx-r);background:#fff;overflow:hidden;',
     'font:var(--sgx-f)/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--sgx-fg)}',
@@ -895,23 +898,44 @@
     '#sgx-ai-panel .sgx-ai-tab.active{color:#1F1D1B;background:#fff;border-color:var(--sgx-bd)}',
     '#sgx-ai-panel .sgx-ic{flex:0 0 auto}',
     '#sgx-ai-panel .sgx-ai-tools{display:flex;align-items:center;gap:var(--sgx-s2)}',
+    /* крупные кнопки: 40x40 и значок 20px — прежние 30px читались как точка */
     '#sgx-ai-panel .sgx-ai-tool{display:flex;align-items:center;justify-content:center;',
-    'width:var(--sgx-ctl);height:var(--sgx-ctl);padding:0;border:0;border-radius:var(--sgx-r-sm);',
-    'background:transparent;color:#6B6A67;cursor:pointer}',
-    '#sgx-ai-panel .sgx-ai-tool:hover{background:#E6E6E6;color:#1F1D1B}',
+    'width:var(--sgx-ctl);height:var(--sgx-ctl);padding:0;border:1px solid var(--sgx-bd);',
+    'border-radius:var(--sgx-r-sm);background:#fff;color:#4B4A47;cursor:pointer}',
+    '#sgx-ai-panel .sgx-ai-tool:hover{background:#F1F1EF;color:#1F1D1B}',
     '#sgx-ai-panel .sgx-ai-lang{display:flex;align-items:center;height:var(--sgx-ctl);',
     'padding:0 var(--sgx-s3);border-radius:var(--sgx-r-sm);border:1px solid var(--sgx-bd);background:#fff;',
     'font-size:var(--sgx-f-xs);color:#5A5955;white-space:nowrap}',
-    '#sgx-ai-panel .sgx-ai-lang.busy{color:#8A6D1F;border-color:#E8D9A8;background:#FDF7E3}',
-    /* выбор модели: такой же орган управления, как «Python 3.6» у самого Stepik */
-    '#sgx-ai-panel .sgx-ai-model{height:var(--sgx-ctl);max-width:200px;padding:0 var(--sgx-s2);',
-    'border:1px solid var(--sgx-bd);border-radius:var(--sgx-r-sm);background:#fff;color:var(--sgx-fg);',
-    'font-family:inherit;font-size:var(--sgx-f-xs);cursor:pointer}',
-    '#sgx-ai-panel .sgx-ai-model:hover{border-color:#C9C9C7}',
-    '#sgx-ai-panel .sgx-ai-model:focus{outline:2px solid #9CC4F0;outline-offset:1px}',
+    /* --- выбор модели: свой список, а не родной select ---
+       Родной <select> в списке значков не покажет, а человек просил значок модели
+       слева и «ум» справа. Поэтому это кнопка + всплывающий список.            */
+    '#sgx-ai-panel .sgx-ai-mbtn{display:flex;align-items:center;gap:var(--sgx-s2);',
+    'height:var(--sgx-ctl);padding:0 var(--sgx-s3);border:1px solid var(--sgx-bd);border-radius:var(--sgx-r-sm);',
+    'background:#fff;color:var(--sgx-fg);font-family:inherit;font-size:var(--sgx-f-xs);',
+    'cursor:pointer;white-space:nowrap}',
+    '#sgx-ai-panel .sgx-ai-mbtn:hover{border-color:#C9C9C7;background:#FBFBFA}',
+    '#sgx-ai-panel .sgx-ai-mbtn .sgx-ai-mchev{color:#9A9893;flex:0 0 auto}',
+    '#sgx-ai-panel .sgx-ai-mwrap{position:relative}',
+    '#sgx-ai-panel .sgx-ai-models{position:absolute;top:calc(100% + var(--sgx-s1));right:0;z-index:5;',
+    'display:none;min-width:330px;padding:var(--sgx-s1);margin:0;list-style:none;',
+    'background:#fff;border:1px solid var(--sgx-bd);border-radius:var(--sgx-r);',
+    'box-shadow:0 8px 24px rgba(15,15,14,.14)}',
+    '#sgx-ai-panel .sgx-ai-models.on{display:block}',
+    '#sgx-ai-panel .sgx-ai-models li{display:flex;align-items:center;gap:var(--sgx-s3);',
+    'padding:var(--sgx-s2) var(--sgx-s3);border-radius:var(--sgx-r-sm);cursor:pointer}',
+    '#sgx-ai-panel .sgx-ai-models li:hover{background:#F4F4F4}',
+    '#sgx-ai-panel .sgx-ai-models li.on{background:#EDF2FB}',
+    '#sgx-ai-panel .sgx-ai-mname{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px}',
+    '#sgx-ai-panel .sgx-ai-mname b{font-size:var(--sgx-f-sm);font-weight:600;color:var(--sgx-fg)}',
+    '#sgx-ai-panel .sgx-ai-mname span{font-size:12px;color:var(--sgx-fg-dim)}',
+    /* «ум» справа: заполненные точки из пяти — видно, чем платишь за качество */
+    '#sgx-ai-panel .sgx-ai-smart{display:inline-flex;gap:3px;flex:0 0 auto}',
+    '#sgx-ai-panel .sgx-ai-smart i{width:7px;height:7px;border-radius:50%;background:#DEDCD8}',
+    '#sgx-ai-panel .sgx-ai-smart i.on{background:#3B7DD8}',
     /* лента: только чтение, ничего не печатается руками. Светлая, как родной
-       редактор кода, поэтому блок читается как его продолжение.              */
-    '#sgx-ai-panel .sgx-ai-log{max-height:46vh;overflow:auto;',
+       редактор кода. Высота ФИКСИРОВАННАЯ и большая: поле не должно прыгать
+       при каждом ответе — только прокрутка.                                   */
+    '#sgx-ai-panel .sgx-ai-log{height:440px;max-height:60vh;overflow:auto;',
     'padding:var(--sgx-s3) var(--sgx-s4);display:flex;flex-direction:column;gap:var(--sgx-s3);background:#fff}',
     '#sgx-ai-panel .sgx-ai-msg{font-size:var(--sgx-f);line-height:1.6;color:var(--sgx-fg)}',
     '#sgx-ai-panel .sgx-ai-msg.sys{color:var(--sgx-fg-dim);font-size:var(--sgx-f-xs)}',
@@ -920,11 +944,11 @@
     '#sgx-ai-panel .sgx-ai-codewrap{position:relative}',
     '#sgx-ai-panel .sgx-ai-code{margin:0;padding:var(--sgx-s3) var(--sgx-s4);border-radius:var(--sgx-r-sm);',
     'background:#F7F7F6;border:1px solid #ECECEA;color:#1F1D1B;',
-    'font:var(--sgx-mono)/1.65 ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,Menlo,monospace;',
+    'font:var(--sgx-mono)/1.6 ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,Menlo,monospace;',
     'white-space:pre-wrap;overflow-wrap:anywhere}',
     '#sgx-ai-panel .sgx-ai-codecopy{position:absolute;top:var(--sgx-s2);right:var(--sgx-s2);',
-    'display:flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;',
-    'border:1px solid var(--sgx-bd);border-radius:var(--sgx-r-sm);background:#fff;color:#6B6A67;',
+    'display:flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;',
+    'border:1px solid var(--sgx-bd);border-radius:var(--sgx-r-sm);background:#fff;color:#4B4A47;',
     'cursor:pointer;opacity:0;transition:opacity .15s ease}',
     '#sgx-ai-panel .sgx-ai-codewrap:hover .sgx-ai-codecopy,',
     '#sgx-ai-panel .sgx-ai-codecopy:focus{opacity:1}',
@@ -939,7 +963,7 @@
     'font-size:var(--sgx-f-sm);color:var(--sgx-fg-dim)}',
     '#sgx-ai-panel .sgx-ai-secs{font-size:var(--sgx-f-xs);color:#B0AEA9;font-variant-numeric:tabular-nums}',
     '#sgx-ai-panel .sgx-ai-dots{display:inline-flex;gap:3px}',
-    '#sgx-ai-panel .sgx-ai-dots span{width:6px;height:6px;border-radius:50%;background:currentColor;',
+    '#sgx-ai-panel .sgx-ai-dots span{width:7px;height:7px;border-radius:50%;background:currentColor;',
     'animation:sgx-blink 1.2s ease-in-out infinite}',
     '#sgx-ai-panel .sgx-ai-dots span:nth-child(2){animation-delay:.2s}',
     '#sgx-ai-panel .sgx-ai-dots span:nth-child(3){animation-delay:.4s}',
@@ -1188,6 +1212,12 @@ var ICONS = {
     code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
     broom: '<path d="M19 3l-6.5 6.5"/><path d="M14 12l-3.5 3.5"/>' +
       '<path d="M13.5 10.5a5 5 0 0 1-7 7l-3.5-3.5a5 5 0 0 1 7-7z"/>',
+    /* иконки моделей: у каждой модели свой значок в списке выбора */
+    bolt: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    chip: '<rect x="6" y="6" width="12" height="12" rx="2"/>' +
+      '<path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+    gem: '<path d="M6 3h12l4 6-10 12L2 9z"/><path d="M2 9h20M9 3l3 18M15 3l-3 18"/>',
+    chev: '<polyline points="6 9 12 15 18 9"/>',
     sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>' +
       '<line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>' +
       '<line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>' +
@@ -1680,25 +1710,57 @@ async function jobCollect(ctx, target) {
      запрос висел, а человек не понимал, работает скрипт или умер.              */
   var AI_TIMEOUT = 90000;
 
+  /* Каталог моделей канала. Список взят у самого сервиса (GET /v1/models), а не
+     придуман: у каждой записи — значок для списка, «ум» по пятибалльной шкале
+     (человек должен видеть, чем платит за ум: сильные модели думают дольше)
+     и СВОЙ лимит ответа.
+
+     Лимит — главное здесь. Reasoning-модель пишет размышления прямо в ответ, и
+     общий лимит 4000 съедали именно они: до кода доезжало «```python\na», ответ
+     приходил обрывком. Поэтому сильным моделям лимит поднят, а слабым оставлен
+     скромным — иначе они просто пишут дольше.                                   */
+  var AI_MODELS = [
+    {
+      id: 'glm-5.3-flash', label: 'GLM 5.3 Flash', icon: 'bolt', smarts: 2,
+      maxTokens: 8000, note: 'быстрая, для простых заданий'
+    },
+    {
+      id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', icon: 'chip', smarts: 3,
+      maxTokens: 20000, note: 'думает прямо в ответе — лимит выше'
+    },
+    {
+      id: 'kimi-k2.7-code', label: 'Kimi K2.7 Code', icon: 'code', smarts: 4,
+      maxTokens: 32000, note: 'заточена под код'
+    },
+    {
+      id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', icon: 'gem', smarts: 5,
+      maxTokens: 40000, note: 'самая сильная, отвечает дольше'
+    }
+  ];
+
+  function modelInfo(id) {
+    for (var i = 0; i < AI_MODELS.length; i++) {
+      if (AI_MODELS[i].id === id) return AI_MODELS[i];
+    }
+    return AI_MODELS[0];
+  }
+
   /* Канал один — свой, по ключу. Бесплатный (text.pollinations.ai) убран: у него
      анонимный тариф отвечал 402 через раз, а решение нужно здесь и сейчас.        */
   var AI_CHANNELS = [
     {
       id: 'own', label: 'свой ключ', needKey: true,
       url: 'https://api.reformboss.com/v1/chat/completions',
-      models: ['glm-5.3-flash', 'deepseek-v4-flash'],
+      models: AI_MODELS.map(function (m) { return m.id; }),
       headers: function (key) { return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }; },
       body: function (model, system, user) {
         return {
           model: model,
           messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-          /* 4000 вместо 8000: щедрый лимит заставляет модель писать дольше, а для
-             решения хватает с запасом. Обрыв по лимиту теперь распознаётся
-             (finish_reason), поэтому слишком тесный потолок не страшен —
-             неполный ответ не показывается как готовый и не публикуется.       */
-          max_tokens: 4000,
-          /* Низкая температура: решение задачи, а не рассказ. Заодно заметно
-             меньше «рассуждений» в ответе, а значит и времени.                 */
+          /* лимит — из каталога: у reasoning-моделей он заметно больше, иначе
+             размышления съедают весь ответ и до кода доезжает пара символов */
+          max_tokens: modelInfo(model).maxTokens,
+          /* Низкая температура: решение задачи, а не рассказ. */
           temperature: 0.2,
           private: true
         };
@@ -1778,13 +1840,16 @@ async function jobCollect(ctx, target) {
     try { GM_setValue(AI_MODEL_KEY, name); } catch (e) { /* ignore */ }
   }
 
-  /* Порядок перебора: сначала выбранная модель, потом остальные как запасные —
-     если выбранная молчит или обрезает ответ, шанс всё равно остаётся.          */
+  /* Порядок перебора: сначала выбранная модель, потом ОДНА запасная — если
+     выбранная молчит, шанс всё равно остаётся. Больше двух не берём: каталог
+     моделей длинный, и на сбое сервиса перебор всех подряд превращался в восемь
+     попыток с паузами — человек ждал минуту вместо внятной ошибки.            */
   function modelsFor(ch) {
     var all = (ch && ch.models) || [];
     var want = aiModel();
-    if (all.indexOf(want) < 0) return all;
-    return [want].concat(all.filter(function (m) { return m !== want; }));
+    if (all.indexOf(want) < 0) return all.slice(0, 2);
+    var rest = all.filter(function (m) { return m !== want; });
+    return [want].concat(rest.slice(0, 1));
   }
 
   /* Пауза между запросами к своему каналу — чтобы не долбить сервис в цикле. */
@@ -1949,11 +2014,18 @@ async function jobCollect(ctx, target) {
     var s = orig;
     var paired = false;             /* нашли ли настоящую пару ограждений */
 
-    /* ```python\n…\n``` — берём то, что внутри первых ограждений. Метку языка
-       читаем до конца строки: «```Python 3.6» — это тоже метка, а не код,
-       и хвост «3.6» в решение попасть не должен.                               */
-    var tick = s.match(/```[^\n]*\n([\s\S]*?)```/);
-    if (tick && tick[1] && tick[1].trim()) { s = tick[1].trim(); paired = true; }
+    /* Ограждений в ответе бывает несколько: по дороге модель показывает примеры,
+       а настоящий ответ идёт последним. Раньше бралось ПЕРВОЕ ограждение — и
+       в решение попадал кусок размышлений вместо ответа. Берём последнее.
+       Метку языка читаем до конца строки: «```Python 3.6» — это тоже метка,
+       а не код, и хвост «3.6» в решение попасть не должен.                     */
+    var bodies = [];
+    var re = /```[^\n]*\n([\s\S]*?)```/g;
+    var hit;
+    while ((hit = re.exec(s)) !== null) {
+      if (hit[1] && hit[1].trim()) bodies.push(hit[1].trim());
+    }
+    if (bodies.length) { s = bodies[bodies.length - 1]; paired = true; }
     /* ограждение с меткой и без переноса (одна строка кода): ```print(1)``` */
     if (!paired) {
       var one = s.match(/```[ \t]*([A-Za-z0-9+#.\-]*?)[ \t]*([\s\S]*?)```/);
@@ -1988,13 +2060,55 @@ async function jobCollect(ctx, target) {
                """
        превращалось в код без кавычек — то есть в синтаксическую ошибку.
        Одинарные и двойные кавычки в Python — это строки, их трогать нельзя.     */
-    if (!paired) return s;
+    /* Ограждений не было: возможно, модель написала размышления прямо в ответ.
+       Тогда отрезаем всё до последнего начала кода (см. cutReasoning).         */
+    if (!paired) return cutReasoning(s);
     var fenceOnly = /^\s*```+\s*$/;             /* строка только из бэктиков */
     var out = s.split('\n');
     while (out.length && fenceOnly.test(out[0])) out.shift();
     while (out.length && fenceOnly.test(out[out.length - 1])) out.pop();
     var stripped = out.join('\n').replace(/^\s*\n+|\n+\s*$/g, '');
     return stripped.trim() ? stripped : orig;
+  }
+
+  /* Reasoning-модель вываливает размышления прямо в ответ: «We need answer only
+     code in Python. Need parse problem. Need understand Stepik task…». В ленту
+     уезжает стена английского текста, а код — в самом конце. Признак узкий
+     (несколько служебных оборотов разом), чтобы не порезать нормальный ответ.  */
+  var REASONING_MARKS = [
+    /\bwe need\b/i, /\bneed to\b/i, /\blet'?s\b/i, /\bi think\b/i, /\bmaybe\b/i,
+    /\bso the\b/i, /\bfirst,?\s+we\b/i, /\bthe user (?:says|wants|asks)\b/i,
+    /\bperhaps\b/i, /\bwait,?\b/i, /\bso we (?:can|should|need)\b/i
+  ];
+
+  function looksLikeReasoning(text) {
+    var t = String(text || '');
+    if (t.length < 240) return false;
+    var hits = 0;
+    for (var i = 0; i < REASONING_MARKS.length; i++) {
+      if (REASONING_MARKS[i].test(t)) hits++;
+    }
+    return hits >= 3;
+  }
+
+  /* Отрезать размышления: оставляем всё от последней строки, похожей на начало
+     кода. Если такой строки нет или хвост не похож на код — возвращаем как есть:
+     показать лишнее лучше, чем потерять ответ.                                  */
+  function cutReasoning(text) {
+    var t = String(text || '');
+    if (!looksLikeReasoning(t)) return t;
+    var lines = t.split('\n');
+    var start = -1;
+    for (var i = 0; i < lines.length; i++) {
+      if (/^\s*(?:import\s|from\s+\w+\s+import|def\s+\w|class\s+\w|if\s+__name__|#)/.test(lines[i])) {
+        start = i;
+      }
+    }
+    if (start <= 0) return t;
+    var tail = lines.slice(start).join('\n');
+    /* хвост должен быть кодом, а не ещё одной порцией прозы */
+    if (!/(?:^\s+\S|print\(|return |input\(|console\.|\{|\})/m.test(tail)) return t;
+    return tail.trim().length > 8 ? tail.trim() : t;
   }
 
   /* Ответ оборвался по лимиту токенов. Снаружи это выглядит как «модель написала
@@ -2324,7 +2438,6 @@ async function jobCollect(ctx, target) {
       aiLogAdd('шаг ' + ctx.step + ' · ' + langLabel(stepLanguage()), 'sys');
     }
     var thinking = aiLogThink(fixed ? 'ИИ правит решение по ошибке теста' : 'ИИ думает и проверяет себя');
-    aiMarkVerifying(true);
 
     try {
       var got = await aiCall(aiSystem(), aiUserFor(ctx), { retry: !fixed });
@@ -2365,7 +2478,6 @@ async function jobCollect(ctx, target) {
       saveAiToStore(ctx).catch(function (e) { log('публикация решения ИИ не удалась: ' + e.message) });
     } catch (e) {
       dropThink(thinking);
-      aiMarkVerifying(false);
       aiLogAdd(e.message, 'err');
       setStatus('ИИ не ответил — ' + e.message);
     } finally {
@@ -2400,7 +2512,6 @@ async function jobCollect(ctx, target) {
     var was = aiVia;
     aiLogAdd(err, 'err');
     aiLogAdd('пробую исправить сам…', 'sys');
-    aiMarkVerifying(true);
 
     var fixCtx = Object.assign({}, ctx);
     try { fixCtx.prevCode = await lastSubmissionCode(); } catch (e) { fixCtx.prevCode = prev; }
@@ -2410,7 +2521,6 @@ async function jobCollect(ctx, target) {
     try {
       got = await aiCall(aiSystem(), aiUserFor(fixCtx), { retry: false });
     } catch (e) {
-      aiMarkVerifying(false);
       aiLogAdd('ИИ не смог исправить — ' + e.message, 'err');
       return { skipped: 'ошибка канала: ' + e.message };
     }
@@ -2493,6 +2603,12 @@ async function jobCollect(ctx, target) {
       aiLogAdd('вставлять нечего: ответ неполный', 'sys');
       return { skipped: 'ответ обрезан' };
     }
+    /* В редактор тоже не подставляем стену размышлений: от неё код не заработает,
+       а человек потеряет то, что писал.                                        */
+    if (looksLikeReasoning(aiAnswer.text)) {
+      aiLogAdd('вставлять нечего: в ответе размышления, а не решение — смени модель', 'sys');
+      return { skipped: 'размышления вместо ответа' };
+    }
 
     /* карточка задания дорисовывается не сразу — даём ей шанс появиться */
     if (!insertTarget()) await waitFor(insertTarget, 6000, 250);
@@ -2544,6 +2660,12 @@ async function jobCollect(ctx, target) {
       log('решение ИИ обрезано по лимиту — в хранилище не кладу');
       return { skipped: 'ответ обрезан' };
     }
+    /* Размышления вместо ответа в общую папку тоже не кладём: это не решение,
+       а чужая стенография мыслей, и она останется там навсегда.               */
+    if (looksLikeReasoning(aiAnswer.text)) {
+      log('в ответе ИИ одни размышления, а не решение — в хранилище не кладу');
+      return { skipped: 'размышления вместо ответа' };
+    }
     var kind = aiAnswer.kind === 'choice' ? 'choice' : 'code';
     var content = aiAnswer.text;
     /* У теста с выбором ответ модели — текст, а хранилищу нужны варианты. Если
@@ -2575,7 +2697,16 @@ async function jobCollect(ctx, target) {
      после «Спросить ИИ по шагу» и наполняем лентой сообщений. Печатать в ленте
      нельзя, поэтому это не textarea, а набор блоков: так человек видит и ход
      работы («думает»), и ошибки тестов, и итоговый код.                        */
-  function aiRootEl() { return document.getElementById('sgx-ai-root'); }
+  var aiRootCache = null;              /* единственный экземпляр блока ИИ */
+
+  /* Возвращаем блок и когда он ещё не поставлен на страницу: иначе настройки,
+     применённые до появления места, уходили бы в никуда.                       */
+  function aiRootEl() {
+    if (aiRootCache) return aiRootCache;
+    var found = document.getElementById('sgx-ai-root');
+    if (found) aiRootCache = found;
+    return found;
+  }
 
   function aiLogEl() { return document.getElementById('sgx-ai-log'); }
 
@@ -2723,20 +2854,6 @@ async function jobCollect(ctx, target) {
     }
     var lang = document.getElementById('sgx-ai-lang');
     if (lang) lang.textContent = langLabel(aiAnswer.lang || '');
-    aiMarkVerifying(false);
-  }
-
-  /* Подпись на кнопке «Спросить ИИ» и в метке языка: пока модель проверяет себя,
-     человек должен видеть, что работа ещё идёт.                                 */
-  function aiMarkVerifying(on) {
-    var lang = document.getElementById('sgx-ai-lang');
-    if (!lang) return;
-    if (on) {
-      lang.textContent = 'проверяю…';
-      lang.classList.add('busy');
-    } else {
-      lang.classList.remove('busy');
-    }
   }
 
   function aiAnswerAt(key) {
@@ -3061,24 +3178,36 @@ async function jobCollect(ctx, target) {
      прямо под редактором, в области .quiz-plugin, и выглядит как его продолжение:
      вкладка «Код», копирование, сброс, метка языка и выбор модели.              */
   function ensureAiRoot() {
-    if (document.getElementById('sgx-ai-root')) return document.getElementById('sgx-ai-root');
+    /* Держим ссылку сами. Раньше признаком «блок уже есть» был только поиск по
+       документу, а блок, созданный до того, как нашлось место (aiSlot вернул
+       null), в документ не попадал — и следующий вызов создавал ВТОРОЙ блок.
+       Теперь элемент всегда один.                                             */
+    if (aiRootCache) return aiRootCache;
+    var found = document.getElementById('sgx-ai-root');
+    if (found) { aiRootCache = found; return found; }
     var root = document.createElement('div');
     root.id = 'sgx-ai-root';
     root.setAttribute('data-sgx-ai', '1');
     root.innerHTML = [
       '<div id="sgx-ai-panel">',
       '<div class="sgx-ai-head">',
-      '<ul class="sgx-ai-tabs"><li class="sgx-ai-tab active">' + icon('code', 14) + 'Код</li></ul>',
+      /* Вкладка названа «ИИ» со значком искры: «Код» дублировало вкладку самого
+         Stepik рядом и путало — тут не редактор, а помощник.                    */
+      '<ul class="sgx-ai-tabs"><li class="sgx-ai-tab active">' + icon('spark', 18) + 'ИИ</li></ul>',
       '<div class="sgx-ai-tools">',
-      /* Копирование переехало внутрь области кода (см. aiLogAdd) — здесь его нет:
-         кнопка рядом с кодом нужнее, чем кнопка в шапке.                      */
       '<span class="sgx-ai-lang" id="sgx-ai-lang">ИИ</span>',
-      /* Модель меняется здесь же, рядом с решением: если одна отвечает медленно
-         или обрывает ответ по лимиту, человек тут же переключается и повторяет
-         запрос, не уходя в меню Tampermonkey.                                  */
-      '<select class="sgx-ai-model" id="sgx-ai-model" title="Модель ИИ"></select>',
+      /* Модель меняется здесь же, рядом с решением. Это свой список, а не родной
+         <select>: в родном нельзя показать значок модели слева и её «ум» справа. */
+      '<div class="sgx-ai-mwrap">',
+      '<button class="sgx-ai-mbtn" id="sgx-ai-mbtn" type="button" title="Модель ИИ">',
+      '<span class="sgx-ic" id="sgx-ai-micon"></span>',
+      '<span id="sgx-ai-mlabel">модель</span>',
+      '<span class="sgx-ai-mchev">' + icon('chev', 14) + '</span>',
+      '</button>',
+      '<ul class="sgx-ai-models" id="sgx-ai-models"></ul>',
+      '</div>',
       '<button class="sgx-ai-tool" id="sgx-ai-reset" type="button" title="Сбросить">' +
-      icon('broom', 14) + '</button>',
+      icon('broom', 18) + '</button>',
       '</div></div>',
       '<div class="sgx-ai-log" id="sgx-ai-log"></div>',
       '</div>'
@@ -3090,39 +3219,82 @@ async function jobCollect(ctx, target) {
       aiLogClear();
       aiShow(false);
     });
-    aiFillModels(root);
-    root.querySelector('#sgx-ai-model').addEventListener('change', function () {
-      setAiModel(this.value);
-      toast('Модель ИИ: ' + this.value);
-      /* Ответ прошлой модели больше не «текущий» — иначе «вставить» подставит
-         решение, принятое другой моделью, а человек будет думать, что это новое. */
-      var ctx = stepContext();
-      if (ctx && aiAnswer && aiAnswer.key === ctx.key) {
-        aiLogAdd('модель переключена на ' + this.value + ' — нажми «Спросить ИИ» заново', 'sys');
-      }
+
+    /* Список моделей: открыть/закрыть, выбрать, закрыть по щелчку мимо и по Esc. */
+    var btn = root.querySelector('#sgx-ai-mbtn');
+    var list = root.querySelector('#sgx-ai-models');
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      list.classList.toggle('on');
     });
+    list.addEventListener('click', function (e) {
+      var li = e.target && e.target.closest ? e.target.closest('li[data-model]') : null;
+      if (!li) return;
+      pickModel(li.getAttribute('data-model'));
+      list.classList.remove('on');
+    });
+    document.addEventListener('click', function (e) {
+      if (!list.classList.contains('on')) return;
+      if (root.contains(e.target)) return;
+      list.classList.remove('on');
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' || e.keyCode === 27) list.classList.remove('on');
+    });
+    aiFillModels(root);
+    aiRootCache = root;
     return root;
   }
 
-  /* Наполнить список моделей. Список берём из канала, выбранную отмечаем —
-     и при каждом показе блока тоже, чтобы селект не разошёлся с настройкой.     */
+  /* Выбрать модель из списка. Ответ прошлой модели больше не «текущий»: иначе
+     «вставить» подставит решение, принятое другой моделью, а человек будет
+     думать, что это новое.                                                     */
+  function pickModel(id) {
+    setAiModel(id);
+    var info = modelInfo(id);
+    toast('Модель ИИ: ' + info.label);
+    var ctx = stepContext();
+    if (ctx && aiAnswer && aiAnswer.key === ctx.key) {
+      aiLogAdd('модель переключена на ' + info.label + ' — нажми «Спросить ИИ» заново', 'sys');
+    }
+    aiFillModels(aiRootEl());
+  }
+
+  /* Наполнить список моделей: значок слева, название с пояснением, «ум» справа.
+     Пересобираем при каждом показе блока, чтобы список не разошёлся с настройкой. */
   function aiFillModels(root) {
-    var sel = (root || document).querySelector('#sgx-ai-model');
-    if (!sel) return null;
-    var list = aiModelList();
+    var box = (root || document).querySelector('#sgx-ai-models');
+    var label = (root || document).querySelector('#sgx-ai-mlabel');
+    var micon = (root || document).querySelector('#sgx-ai-micon');
+    if (!box) return null;
+
     var want = aiModel();
-    var have = Array.prototype.map.call(sel.options, function (o) { return o.value; }).join(',');
-    if (have !== list.join(',')) {
-      sel.innerHTML = '';
-      list.forEach(function (name) {
-        var o = document.createElement('option');
-        o.value = name;
-        o.textContent = name;
-        sel.appendChild(o);
+    var info = modelInfo(want);
+
+    if (label) label.textContent = info.label;
+    if (micon) micon.innerHTML = icon(info.icon, 18);
+
+    var have = Array.prototype.map.call(box.children, function (li) {
+      return li.getAttribute('data-model');
+    }).join(',');
+    if (have !== AI_MODELS.map(function (m) { return m.id; }).join(',')) {
+      box.innerHTML = '';
+      AI_MODELS.forEach(function (m) {
+        var li = document.createElement('li');
+        li.setAttribute('data-model', m.id);
+        var dots = '';
+        for (var i = 0; i < 5; i++) dots += '<i class="' + (i < m.smarts ? 'on' : '') + '"></i>';
+        li.innerHTML = icon(m.icon, 20) +
+          '<span class="sgx-ai-mname"><b>' + escapeHtml(m.label) + '</b>' +
+          '<span>' + escapeHtml(m.note) + '</span></span>' +
+          '<span class="sgx-ai-smart" title="ум ' + m.smarts + ' из 5">' + dots + '</span>';
+        box.appendChild(li);
       });
     }
-    sel.value = want;
-    return sel;
+    Array.prototype.forEach.call(box.children, function (li) {
+      li.classList.toggle('on', li.getAttribute('data-model') === want);
+    });
+    return box;
   }
 
   /* Куда класть блок ИИ. Ищем место внутри карточки задания, вплотную к редактору
