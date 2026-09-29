@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.8.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам вставляет в редактор (со стрелкой переноса), нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: аватар помощника и живые реплики вместо серых строк лога. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
+// @version      6.9.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам — отмечает нужный вариант. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
@@ -64,7 +64,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.8.0';
+  var VERSION = '6.9.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -623,26 +623,51 @@
     el.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  async function writeCode(text) {
+  async function writeCode(text, replaceOnly) {
     var r = await bridgeAsk({ write: text });
     if (r && r.ok) return { ok: true, via: 'CodeMirror' };
 
-    var c6 = $('.cm-content');
-    if (c6) {
-      try {
-        c6.focus();
-        var range = document.createRange();
-        range.selectNodeContents(c6);
-        var sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-        if (document.execCommand('insertText', false, text)) return { ok: true, via: 'редактор' };
-      } catch (e) { /* ниже */ }
+    /* При посимвольном наборе этот путь опасен: execCommand ДОПИСЫВАЕТ к тому,
+       что уже есть, и код задвоился бы на каждом шаге. Поэтому при наборе его
+       пропускаем и пользуемся только теми путями, что заменяют текст целиком.   */
+    if (!replaceOnly) {
+      var c6 = $('.cm-content');
+      if (c6) {
+        try {
+          c6.focus();
+          var range = document.createRange();
+          range.selectNodeContents(c6);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          if (document.execCommand('insertText', false, text)) return { ok: true, via: 'редактор' };
+        } catch (e) { /* ниже */ }
+      }
     }
     var field = $('.attempt-wrapper__plugin textarea') || $('.quiz-component textarea') ||
       $('.attempt-wrapper__plugin input[type="text"]');
     if (field) { setNative(field, text); return { ok: true, via: 'поле ввода' }; }
     return { ok: false, error: 'редактор для вставки не найден' };
+  }
+
+  /* Набор кода «как будто пишет человек»: строки появляются по очереди. Раньше на
+     их месте летела стрелка — человек попросил убрать её и сделать набор.
+     Скорость подбираем от длины: длинное решение не должно набираться полминуты,
+     поэтому шаг растягивается, а общее время ограничено.                        */
+  var TYPE_STEP_MS = 55;
+  var TYPE_MAX_MS = 1500;
+
+  async function typeIntoEditor(text) {
+    var lines = String(text == null ? '' : text).split('\n');
+    if (lines.length < 2) return writeCode(text, true);
+    var per = Math.max(TYPE_STEP_MS, Math.round(TYPE_MAX_MS / lines.length));
+    var res = null;
+    for (var i = 1; i <= lines.length; i++) {
+      res = await writeCode(lines.slice(0, i).join('\n'), true);
+      if (!res || !res.ok) return res;
+      if (i < lines.length) await sleep(per);
+    }
+    return res;
   }
 
   async function readCodeFromEditor() {
@@ -946,7 +971,9 @@
     '#sgx-ai-panel .sgx-ai-row{display:flex;align-items:flex-start;gap:var(--sgx-s2)}',
     '#sgx-ai-panel .sgx-ai-row > *:not(.sgx-ai-ava){flex:1 1 auto;min-width:0}',
     '#sgx-ai-panel .sgx-ai-ava{display:flex;align-items:center;justify-content:center;',
-    'width:28px;height:28px;flex:0 0 auto;border-radius:50%;background:#EAF1FB;color:#3B7DD8}',
+    'width:28px;height:28px;flex:0 0 auto;border-radius:50%;background:#fff;border:1px solid var(--sgx-bd);',
+    'overflow:hidden}',
+    '#sgx-ai-panel .sgx-ai-ava .sgx-ai-mimg{border:0;padding:0;border-radius:0;width:20px;height:20px}',
     '#sgx-ai-panel .sgx-ai-msg{font-size:var(--sgx-f);line-height:1.6;color:var(--sgx-fg)}',
     /* служебная реплика — не мелочь серым: обычный размер и читаемый цвет */
     '#sgx-ai-panel .sgx-ai-msg.sys{color:#4B4A47;font-size:var(--sgx-f-sm);padding-top:3px}',
@@ -991,12 +1018,6 @@
     '#sgx-ai-panel .sgx-ai-dots span:nth-child(2){animation-delay:.2s}',
     '#sgx-ai-panel .sgx-ai-dots span:nth-child(3){animation-delay:.4s}',
     '@keyframes sgx-blink{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:1;transform:translateY(-2px)}}',
-    /* стрелка переноса решения: летит от блока ИИ к редактору. Живёт прямо в body
-       и позиционируется по экрану, потому что путь идёт между двумя разными
-       контейнерами страницы.                                                   */
-    '.sgx-ai-fly{position:fixed;z-index:2147483646;pointer-events:none;opacity:0;color:#3B7DD8;',
-    'transition:transform .62s cubic-bezier(.35,0,.25,1),opacity .18s ease;',
-    'filter:drop-shadow(0 2px 6px rgba(59,125,216,.35))}',
     /* тонкая полоска сверху страницы — как встроенный индикатор сайта */
     '#sgx-progress{position:fixed;top:0;left:0;right:0;height:3px;z-index:2147483600;pointer-events:none}',
     '#sgx-progress>div{height:100%;width:0;background:#4CAF50;opacity:.85;transition:width .35s ease}',
@@ -1126,6 +1147,12 @@
      карточке задания: показать вместо вывода условие задачи было бы хуже, чем не
      показать ничего.                                                           */
   var RUN_OUT_SELS = [
+    /* Настоящая разметка панели запуска (прислал человек):
+       .code-runner__hints > .smart-hints > .show-more > .show-more__content >
+       <p class="smart-hints__hint">Empty result</p>                            */
+    '.code-runner__hints .smart-hints__hint',
+    '.code-runner__hints .show-more__content',
+    '.code-runner__hints',
     '.code-runner__output', '.code-editor-quiz__output', '.run-code-result',
     '.attempt-wrapper__output', '.code-quiz__output', '.execution-result',
     '.run-result', '.code-output', '.output-viewer', '.console-output'
@@ -1180,50 +1207,6 @@
     log.appendChild(aiRow(wrap));
     log.scrollTop = log.scrollHeight;
     return wrap;
-  }
-
-  /* Стрелка «переноса»: летит от блока ИИ к редактору в момент вставки. Это не
-     украшение ради украшения — раньше код просто появлялся в редакторе, и человек
-     не понимал, куда смотреть. Стрелка показывает, куда именно уехало решение.
-     Уважаем «уменьшить движение»: если человек его просил, анимацию не запускаем. */
-  function prefersStill() {
-    try {
-      return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-    } catch (e) { return false; }
-  }
-
-  function flyArrow(from, to) {
-    if (!from || !to || !from.getBoundingClientRect || !to.getBoundingClientRect) return;
-    if (prefersStill()) return;
-    var a = from.getBoundingClientRect();
-    var b = to.getBoundingClientRect();
-    if (!a.width || !a.height || !b.width || !b.height) return;
-
-    var x1 = a.left + a.width / 2;
-    var y1 = a.top + 26;
-    var x2 = b.left + b.width / 2;
-    var y2 = b.top + b.height / 2;
-
-    var el = document.createElement('div');
-    el.className = 'sgx-ai-fly';
-    el.innerHTML = icon('arrow', 30);
-    el.style.left = Math.round(x1) + 'px';
-    el.style.top = Math.round(y1) + 'px';
-    document.body.appendChild(el);
-
-    /* Стартовое положение фиксируем в следующем кадре: без этого браузер склеит
-       начало и конец перехода и стрелка просто появится на месте.
-       requestAnimationFrame берём, только если он есть: в песочнице тестов его
-       нет, и падать из-за анимации скрипт не должен.                          */
-    var nextFrame = (typeof requestAnimationFrame === 'function')
-      ? requestAnimationFrame
-      : function (fn) { setTimeout(fn, 20); };
-    nextFrame(function () {
-      el.style.transform = 'translate(' + Math.round(x2 - x1) + 'px,' + Math.round(y2 - y1) + 'px)';
-      el.style.opacity = '1';
-    });
-    setTimeout(function () { el.style.opacity = '0'; }, 620);
-    setTimeout(function () { el.remove(); }, 900);
   }
 
   function flash(el) {
@@ -1359,9 +1342,6 @@ var ICONS = {
       '<path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
     gem: '<path d="M6 3h12l4 6-10 12L2 9z"/><path d="M2 9h20M9 3l3 18M15 3l-3 18"/>',
     chev: '<polyline points="6 9 12 15 18 9"/>',
-    /* стрелка «переноса»: летит от блока ИИ к редактору, когда решение
-       вставляется — чтобы было видно, куда именно оно уехало */
-    arrow: '<line x1="4" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/>',
     sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>' +
       '<line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>' +
       '<line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>' +
@@ -2327,14 +2307,41 @@ async function jobCollect(ctx, target) {
     return 'text';
   }
 
+  /* Варианты ответа теста. В условии их НЕТ: вопрос лежит в тексте задания, а
+     сами варианты — отдельными строками в блоке с галочками. Без них модель
+     выбирает вслепую, поэтому собираем их отдельно и отдаём в запрос.          */
+  function choiceOptions() {
+    var inputs = $$('.quiz-component[data-type="choice-quiz"] input, .quiz-plugin__content input')
+      .filter(function (i) { return /radio|checkbox/.test(i.type) && !i.disabled; });
+    var out = [];
+    inputs.forEach(function (inp, idx) {
+      var label = inp.closest('label') || inp.parentElement;
+      var txt = norm((label || {}).textContent || '');
+      if (!txt) return;
+      out.push({ n: idx + 1, text: txt, id: String(inp.value) });
+    });
+    return out;
+  }
+
   /* Системный текст держим коротким: он уходит в каждый запрос, и каждое лишнее
      предложение здесь — это лишнее время ответа. Правила оставлены, вода убрана.
 
      Запретный список появился после разбора: на задании про среднее арифметическое
      модель принесла `import sys`, `def main()`, `if __name__ == "__main__"` и
      f-строку `f"{res:.15g}"` — ни одной из этих вещей в уроке ещё не было. Простое
-     «держитесь уровня урока» модель игнорирует, поэтому здесь перечислено прямо.   */
-  function aiSystem() {
+     «держитесь уровня урока» модель игнорирует, поэтому здесь перечислено прямо.
+
+     Для теста с выбором нужен ДРУГОЙ текст: правила про stdin/stdout и «код целиком»
+     сбивали модель с толку, и она писала код там, где надо поставить галочку.     */
+  function aiSystem(kind) {
+    if (kind === 'choice') {
+      return 'Реши тест со Stepik. Верни ТОЛЬКО текст выбранного варианта — ровно так, ' +
+        'как он написан в списке, символ в символ, без пояснений, без markdown и без ' +
+        'нумерации. Если подходит несколько вариантов (галочки, а не кружки) — верни ' +
+        'каждый с новой строки. Никакого кода писать не нужно.\n' +
+        '1. Выбирай по смыслу вопроса, а не по длине варианта.\n' +
+        '2. Если в уроке ещё не было сложных конструкций — выбирай самый простой вариант.';
+    }
     return 'Реши задание со Stepik. Верни ТОЛЬКО ответ: без пояснений, без markdown, ' +
       'без ``` и без строки с названием языка. Код — целиком, одним куском. ' +
       'Ввод и вывод через stdin → stdout; строки могут содержать кириллицу и пробелы.\n' +
@@ -2343,8 +2350,10 @@ async function jobCollect(ctx, target) {
       'списковые включения, f-строки, def main(), if __name__ == "__main__", ' +
       'try/except. Ввод — только input(), вывод — только print().\n' +
       '2. Решение — короткое: несколько строк, без лишних функций и проверок.\n' +
-      '3. Прогони код по тестовым данным из условия и сверь вывод с ожидаемым.\n' +
-      '4. Вывод — ровно как в «выходных данных», символ в символ: 2 и 2.0 — разные ' +
+      '3. Имена переменных — простые и короткие, как у новичка: a, b, c, n, x, ' +
+      'number, text, result. Никаких word_count, idx, tmp, res, obj, cnt.\n' +
+      '4. Прогони код по тестовым данным из условия и сверь вывод с ожидаемым.\n' +
+      '5. Вывод — ровно как в «выходных данных», символ в символ: 2 и 2.0 — разные ' +
       'ответы. Если в «выходе» целое число, а деление дало дробь, выведи целое: ' +
       'посчитай результат и, если он равен своей целой части, напечатай целое.';
   }
@@ -2380,10 +2389,26 @@ async function jobCollect(ctx, target) {
   function aiUserFor(ctx) {
     var kind = stepKindNow();
     var lang = stepLanguage();
-    var ask = kind === 'choice'
-      ? 'Задание — тест с выбором. Пришли номер правильного варианта и его текст, коротко.'
-      : (lang ? 'Пиши на ' + lang + '.' : 'Определи язык по условию и пиши на нём.');
     var task = stepPrompt();
+
+    /* Тест с выбором собираем иначе: вариантов в условии нет, они отдельным
+       блоком, и про stdin/stdout говорить нечего.                             */
+    if (kind === 'choice') {
+      var opts = choiceOptions();
+      var list = opts.map(function (o) { return o.n + ') ' + o.text; }).join('\n');
+      var ask = 'Задание — тест. Выбери верный вариант и верни ТОЛЬКО его текст, ' +
+        'ровно как в списке, без номера и без пояснений.';
+      var base = aiLessonBlock() + '\n' + ask + '\n\nВопрос:\n' + task;
+      if (list) base += '\n\nВарианты ответа:\n' + list;
+      if (ctx && ctx.checkError) {
+        base += '\n\nПрошлый вариант не подошёл. Отчёт проверяющей системы:\n' +
+          String(ctx.checkError).slice(0, 1000) +
+          '\nВыбери ДРУГОЙ вариант.';
+      }
+      return base;
+    }
+
+    var ask2 = lang ? 'Пиши на ' + lang + '.' : 'Определи язык по условию и пиши на нём.';
     /* Тестовые данные — это и есть формат ввода-вывода: без них модель пишет код,
        который читает не то и выводит не так. Просим свериться с ними явно. */
     var hasSamples = /вход:/.test(task);
@@ -2391,12 +2416,12 @@ async function jobCollect(ctx, target) {
       ? '\nСверься с «Тестовые данные»: программа должна читать ровно то, что во «вход»,\n' +
         'и печатать ровно то, что в «выход».'
       : '';
-    var base = aiLessonBlock() + '\n' + ask + hint + '\n\nУсловие:\n' + task;
+    var base2 = aiLessonBlock() + '\n' + ask2 + hint + '\n\nУсловие:\n' + task;
     if (ctx && ctx.prevCode) {
-      base += '\n\nТвой прошлый ответ:\n' + String(ctx.prevCode).slice(0, 1200);
+      base2 += '\n\nТвой прошлый ответ:\n' + String(ctx.prevCode).slice(0, 1200);
     }
     if (ctx && ctx.checkError) {
-      base += '\n\nПроверка его отклонила. Отчёт проверяющей системы:\n' +
+      base2 += '\n\nПроверка его отклонила. Отчёт проверяющей системы:\n' +
         String(ctx.checkError).slice(0, 1000) +
         '\n\nНайди причину и пришли исправленное решение целиком. ' +
         'Если ошибка из-за чтения ввода — учитывай, что данные приходят через stdin, ' +
@@ -2408,15 +2433,15 @@ async function jobCollect(ctx, target) {
        модель уже знает, что именно сломалось.                                   */
     if (!ctx || !ctx.checkError) {
       if (hasSamples) {
-        base += '\n\nПроверь себя на «Тестовых данных»: выполни код на каждой строке\n' +
+        base2 += '\n\nПроверь себя на «Тестовых данных»: выполни код на каждой строке\n' +
           'и сверь вывод с «выходом». Не сошлось — исправь. В ответ — только код.\n' +
           'И помни: без import и без конструкций, которых в уроке не было.';
       } else {
-        base += '\n\nПеречитай условие: решение должно делать ровно то, что просят,\n' +
+        base2 += '\n\nПеречитай условие: решение должно делать ровно то, что просят,\n' +
           'и обходиться тем, что уже проходили, — без import и лишних конструкций.';
       }
     }
-    return base;
+    return base2;
   }
 
   /* --------------------------------------------------- ошибки проверки и правка */
@@ -2425,16 +2450,32 @@ async function jobCollect(ctx, target) {
      «Failed test #1 of 3. Runtime error … Test input: … Correct output: …
      Your code output: … ValueError …». Это готовый разбор ошибки, и именно его
      надо вернуть модели — иначе она будет угадывать, что не так.                */
+  /* Отчёт ПРОВЕРКИ. Здесь же рядом живёт вывод ЗАПУСКА (`.code-runner__hints`
+     тоже `.smart-hints`), и раньше он попадал в этот поиск: «Empty result» из
+     панели запуска уезжал модели как «проверка отклонила ответ». Поэтому всё,
+     что лежит внутри панели запуска, из отчёта проверки выбрасываем.          */
+  function checkHintNodes() {
+    return $$('.smart-hints__hint').filter(function (n) {
+      return !(n.closest && n.closest('.code-runner__hints'));
+    });
+  }
+
   function stepErrorText() {
-    var box = $('.submission-show__submission-hint') || $('.smart-hints');
-    var nodes = box ? $$('.smart-hints__hint', box) : $$('.smart-hints__hint');
+    var box = $('.submission-show__submission-hint');
+    var nodes = box ? $$('.smart-hints__hint', box).filter(function (n) {
+      return !(n.closest && n.closest('.code-runner__hints'));
+    }) : checkHintNodes();
     var parts = [];
     nodes.forEach(function (n) {
       var t = norm(n.textContent || '');
       if (t.length > 3) parts.push(t);
     });
     if (parts.length) return parts.join('\n');
-    return box ? norm(box.textContent || '') : '';
+    if (box) return norm(box.textContent || '');
+    /* запасной путь: контейнер без разметки, но не панель запуска */
+    var alt = $$('.submission-show__submission-hint, .attempt-wrapper-alerts .smart-hints')
+      .filter(function (n) { return !(n.closest && n.closest('.code-runner__hints')); })[0];
+    return alt ? norm(alt.textContent || '') : '';
   }
 
   /* Ошибка бывает и без слова «Failed»: «Wrong answer», «Compilation error»,
@@ -2499,7 +2540,7 @@ async function jobCollect(ctx, target) {
           var opts = {
             method: 'POST',
             headers: ch.headers(key),
-            body: JSON.stringify(ch.body(model, system || aiSystem(), user || aiUser(ctx)))
+            body: JSON.stringify(ch.body(model, system || aiSystem(stepKindNow()), user || aiUser(ctx)))
           };
           if (ctrl) opts.signal = ctrl.signal;
           var res = await fetch(ch.url, opts);
@@ -2608,7 +2649,9 @@ async function jobCollect(ctx, target) {
       : 'ИИ пишет решение…');
 
     try {
-      var got = await aiCall(aiSystem(), aiUserFor(ctx), { retry: !fixed });
+      /* Вид задания берём со страницы: у теста с выбором и у кода разные и
+         системный текст, и запрос — иначе модель писала код там, где нужна галочка. */
+      var got = await aiCall(aiSystem(stepKindNow()), aiUserFor(ctx), { retry: !fixed });
 
       /* Снимаем ограждения сразу: и в ленте, и при копировании, и при вставке
          в редактор человек должен видеть чистый ответ, а не ```python … ```. */
@@ -2686,7 +2729,10 @@ async function jobCollect(ctx, target) {
 
     var got = null;
     try {
-      got = await aiCall(aiSystem(), aiUserFor(fixCtx), { retry: false });
+      /* При правке вид берём из прошлого ответа: после провала Stepik может
+         спрятать редактор, и по странице вид уже не определить.                 */
+      var fixKind = (aiAnswer && aiAnswer.kind) || stepKindNow();
+      got = await aiCall(aiSystem(fixKind), aiUserFor(fixCtx), { retry: false });
     } catch (e) {
       aiLogAdd('Исправить не получилось: ' + e.message, 'err');
       return { skipped: 'ошибка канала: ' + e.message };
@@ -2751,8 +2797,11 @@ async function jobCollect(ctx, target) {
       if (!txt) return;
       /* по тексту варианта */
       if (body.indexOf(txt) >= 0) { answers.push(txt); ids.push(String(inp.value)); return; }
-      /* по номеру: строки вида «2) …» или «2. …» или «ответ: 2» */
-      var num = new RegExp('(?:^|[^\\d])' + (idx + 1) + '\\s*[).:—-]', 'm');
+      /* по номеру: «2) …», «2. …», «ответ: 2», «Вариант 4» и просто «4».
+         Раньше после цифры требовался знак препинания, и ответ «Правильный
+         вариант: 4» (номер в конце) не распознавался — модель выбирает верно,
+         а галочка не ставилась. Теперь знак или конец строки.                 */
+      var num = new RegExp('(?:^|[^\\d])' + (idx + 1) + '(?=\\s*(?:[).:—\\-−]|$))', 'm');
       if (num.test(body)) { answers.push(txt); ids.push(String(inp.value)); }
     });
     if (!answers.length) return null;
@@ -2822,23 +2871,32 @@ async function jobCollect(ctx, target) {
     }
 
     var kind = aiAnswer.kind === 'choice' ? 'choice' : 'code';
-    /* Стрелку запускаем ДО вставки: пока она летит, код уже появляется в
-       редакторе — человек видит и путь, и результат.                           */
     var target = insertTarget();
-    flyArrow(aiRootEl(), target && target.anchor);
 
     var res;
     if (kind === 'choice') {
       var picked = choiceFromText(aiAnswer.text);
       res = picked ? writeChoice(picked) : { ok: false, error: 'варианты не распознаны' };
-    } else {
-      res = await writeCode(aiAnswer.text);
+      if (!res || !res.ok) {
+        aiLogAdd('Отметить вариант не получилось: ' +
+          ((res && res.error) || 'неизвестная причина') + '.', 'sys');
+        return { skipped: (res && res.error) || 'ошибка выбора' };
+      }
+      aiLogAdd('Отметил вариант ответа. Осталось нажать «Отправить на проверку».', 'sys');
+      if (target) flash(target.anchor);
+      /* У теста с выбором запускать нечего: там нет ни редактора, ни кнопки
+         «Запустить код». Раньше скрипт честно искал её и писал «не нашёл».      */
+      return { inserted: true, ran: false, kind: 'choice' };
     }
+
+    /* Код набираем строка за строкой — как будто пишет человек. Длинное решение
+       не тянется: шаг набора растёт вместе с числом строк (см. typeIntoEditor).  */
+    res = await typeIntoEditor(aiAnswer.text);
     if (!res || !res.ok) {
       aiLogAdd('Вставить не получилось: ' + ((res && res.error) || 'неизвестная причина') + '.', 'sys');
       return { skipped: (res && res.error) || 'ошибка вставки' };
     }
-    aiLogAdd('Готово — перенёс решение в редактор.', 'sys');
+    aiLogAdd('Готово — написал решение в редакторе.', 'sys');
     if (target) flash(target.anchor);
 
     /* Кнопка запуска появляется вместе с редактором, поэтому ждём её, а не
@@ -2928,18 +2986,19 @@ async function jobCollect(ctx, target) {
 
   function aiLogEl() { return document.getElementById('sgx-ai-log'); }
 
-  /* Строка чата: слева аватар помощника, справа сообщение. Раньше служебные
-     строки были просто серым мелким текстом с маленькой буквы («вставил решение
-     в редактор») — читалось как лог скрипта, а не как разговор. Человек просил
-     «более общительнее, как чат бот прям» — отсюда и аватар, и живые фразы.     */
-  function aiRow(content) {
+  /* Строка чата: слева аватар отвечающей модели, справа сообщение. Раньше
+     служебные строки были просто серым мелким текстом с маленькой буквы
+     («вставил решение в редактор») — читалось как лог скрипта, а не как разговор.
+     В аватаре — логотип той модели, которая сейчас отвечает: видно, кто говорит. */
+  function aiRow(content, modelId) {
     var row = document.createElement('div');
     row.className = 'sgx-ai-row';
     var ava = document.createElement('span');
     ava.className = 'sgx-ai-ava';
-    ava.innerHTML = icon('spark', 16);
+    ava.innerHTML = modelIcon(modelInfo(modelId || aiModel()), 20);
     row.appendChild(ava);
     row.appendChild(content);
+    wireModelIcons(row);
     return row;
   }
 
@@ -2983,7 +3042,7 @@ async function jobCollect(ctx, target) {
      области кода: раньше она стояла в шапке блока, далеко от самого решения, и
      её приходилось искать. Теперь она в правом верхнем углу кода и появляется
      при наведении — как в редакторах кода.                                    */
-  function aiLogAdd(text, kind, monospace) {
+  function aiLogAdd(text, kind, monospace, modelId) {
     var log = aiLogEl();
     if (!log || !text) return null;
     var el = document.createElement('div');
@@ -3009,7 +3068,7 @@ async function jobCollect(ctx, target) {
       node = wrap;
     }
 
-    log.appendChild(aiRow(node));
+    log.appendChild(aiRow(node, modelId));
     log.scrollTop = log.scrollHeight;
     return el;
   }
@@ -3129,7 +3188,9 @@ async function jobCollect(ctx, target) {
      а ленту они засоряют. Модель и так видна в шапке блока.                    */
   function aiLogAnswer() {
     if (!aiAnswer || !aiAnswer.text) return;
-    aiLogAdd(aiAnswer.text, '', true);
+    /* под логотипом именно той модели, что ответила: человек мог переключить
+       модель после ответа, и подпись не должна ему врать                        */
+    aiLogAdd(aiAnswer.text, '', true, aiAnswer.model);
     if (aiAnswer.truncated) {
       aiLogAdd('Ответ оборвался по лимиту — это не решение целиком. Нажми «Спросить ИИ» ещё раз или выбери другую модель.', 'err');
     }

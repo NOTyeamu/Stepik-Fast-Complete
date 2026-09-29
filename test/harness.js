@@ -148,7 +148,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       calls: [], inbox: {}, inboxMessages: [], menu: {},
       store: Object.assign({}, store || {}), submissions: submissions || [],
       storeDown: !!storeDown, emptyLessonSteps: !!emptyLessonSteps,
-      setValue: null, submitted: 0, retried: 0, ran: 0, flew: 0, docBlob: null, shots: 0,
+      setValue: null, submitted: 0, retried: 0, ran: 0, types: 0, docBlob: null, shots: 0,
       aiPaidCalls: [], aiPaidDown: !!aiPaidDown, aiPaidText: aiPaidText,
       aiPaidEmpty: !!aiPaidEmpty, aiPaidQueue: aiPaidQueue || [],
       aiTruncated: !!aiTruncated, aiFinishReason: aiFinishReason || '',
@@ -190,7 +190,9 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
     const mkCm = (node) => {
       node.CodeMirror = {
         getValue: () => (state.setValue == null ? '' : state.setValue),
-        setValue: (v) => { state.setValue = v; },
+        /* types считает, сколько раз текст переписывался: набор идёт строка за
+           строкой, поэтому при наборе счётчик растёт, а при вставке — нет */
+        setValue: (v) => { state.setValue = v; state.types++; },
         /* язык приходит из редактора; по умолчанию C#, но сценарий может задать
            свой — иначе «Python-ответ» проверялся бы на C#-расширении */
         getOption: () => state.cmMode || 'text/x-csharp',
@@ -213,14 +215,6 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       if (cl.contains('retry')) state.retried++;
     });
 
-    /* Стрелка переноса живёт меньше секунды и сама себя убирает, поэтому
-       «поймать» её можно только в момент появления — считаем вставки в body. */
-    const mo = new window.MutationObserver((muts) => {
-      muts.forEach((m) => Array.prototype.forEach.call(m.addedNodes, (n) => {
-        if (n.classList && n.classList.contains('sgx-ai-fly')) state.flew++;
-      }));
-    });
-    mo.observe(window.document.body, { childList: true });
 
     const cmNode = window.document.querySelector('.CodeMirror');
     if (cmNode) mkCm(cmNode);
@@ -695,14 +689,58 @@ const QUIZ_PLUGIN_HTML = `<!doctype html><html><body>
           </div>
           <div id="ember2683" class="code-runner ember-view code-quiz__run-panel">
             <textarea id="id_coderunner_input"></textarea>
-            <!-- вывод запуска: скрипт показывает его прямо в ленте -->
-            <div class="code-runner__output">2</div>
+            <!-- вывод запуска ровно в той разметке, что прислал человек:
+                 .code-runner__hints > .smart-hints > .show-more__content > .smart-hints__hint -->
+            <div class="code-runner__hints">
+              <div class="smart-hints ember-view">
+                <div class="show-more" style="--max-height: 120;">
+                  <div class="show-more__content"><p class="smart-hints__hint">2</p></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </div>
     <button class="submit" type="button">Отправить на проверку</button>
     ${RUN_BUTTON_HTML}
+  </div></div>
+</body></html>`;
+
+/* Страница, где ответ — галочка, а не код. Разметка взята у человека целиком:
+   вопрос в .html-content, варианты — в label.s-radio внутри
+   .quiz-component[data-type="choice-quiz"], кнопка отправки пока disabled.
+   Здесь важно, что вариантов НЕТ в условии — их надо собрать отдельно, иначе
+   модель выбирает вслепую. */
+const CHOICE_ONLY_HTML = `<!doctype html><html><body>
+  ${SHELL_HTML}
+  <div class="quiz-show"><div class="quiz-layout-head"><div class="step-wrapper">
+    <div class="step-inner page-fragment">
+      <div class="html-content rich-text-viewer"><span><p>Что из перечисленного соответствует методу, который принимает два числа и возвращает их произведение?</p></span></div>
+    </div>
+  </div></div>
+  <div class="attempt-main"><div class="attempt-wrapper choice">
+    <div class="page-fragment attempt-wrapper__content">
+      <div class="attempt-wrapper__heading"><h3 class="attempt-wrapper__typename">Выберите один вариант из списка</h3></div>
+      <div class="attempt-wrapper__plugin">
+        <div class="quiz-plugin"><div class="show-plugin"><div class="quiz-plugin__content">
+          <div data-state="no_submission" data-type="choice-quiz" class="quiz-component ember-view">
+            <label class="s-radio"><input class="s-radio__input" name="q" type="radio" value="101">
+              <span class="s-radio__label choice-quiz-show__option">static int Multiply()</span></label>
+            <label class="s-radio"><input class="s-radio__input" name="q" type="radio" value="102">
+              <span class="s-radio__label choice-quiz-show__option">static void Multiply(int a, int b)</span></label>
+            <label class="s-radio"><input class="s-radio__input" name="q" type="radio" value="103">
+              <span class="s-radio__label choice-quiz-show__option">void static Multiply(int, int)</span></label>
+            <label class="s-radio"><input class="s-radio__input" name="q" type="radio" value="104">
+              <span class="s-radio__label choice-quiz-show__option">static int Multiply(int a, int b)</span></label>
+          </div>
+        </div></div></div>
+      </div>
+      <div class="attempt-wrapper-buttons">
+        <button class="attempt-wrapper-button" type="button" disabled>Отправить на проверку</button>
+      </div>
+      <div id="sgx-test-hint"></div>
+    </div>
   </div></div>
 </body></html>`;
 
@@ -1331,7 +1369,7 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       /* ...но отправка на проверку остаётся за человеком */
       check('«Отправить на проверку» НЕ нажата', st.submitted === 0, 'кликов: ' + st.submitted);
       check('в ленте сказано про вставку и запуск',
-        /перенёс решение в редактор/.test(aiFeedText(win, st)) &&
+        /написал решение в редакторе/.test(aiFeedText(win, st)) &&
         /Запускаю код/.test(aiFeedText(win, st)),
         aiFeedText(win, st).slice(0, 120));
       /* Решение намеренно уезжает в общее хранилище: иначе кнопка «вставить»
@@ -2632,11 +2670,12 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       const log = win.document.querySelector('#sgx-ai-log');
       const rows = Array.from(log.querySelectorAll('.sgx-ai-row'));
       check('все сообщения — строки чата', rows.length >= 3, 'строк: ' + rows.length);
-      check('у каждой строки есть аватар помощника',
-        rows.length > 0 && rows.every((r) => r.querySelector(':scope > .sgx-ai-ava svg')),
+      check('у каждой строки есть аватар отвечающей модели',
+        rows.length > 0 && rows.every((r) => !!r.querySelector(':scope > .sgx-ai-ava img')),
         'аватара нет');
-      check('в аватаре значок искры',
-        !!(log.querySelector('.sgx-ai-ava svg')), 'значка нет');
+      check('в аватаре логотип модели, а не значок искры',
+        !!(log.querySelector('.sgx-ai-ava img.sgx-ai-mimg')) &&
+        !log.querySelector('.sgx-ai-ava svg'), 'логотипа нет');
 
       const sys = Array.from(log.querySelectorAll('.sgx-ai-msg.sys')).map((e) => e.textContent);
       check('служебные реплики есть', sys.length >= 2, 'реплик: ' + sys.length);
@@ -2752,24 +2791,138 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
   }
 
   /* --- 65. стрелка переноса летит от ИИ к редактору ----------------------- */
-  console.log('\n=== 65. при вставке решения летит стрелка к редактору ===');
+  /* --- 65. решение набирается в редакторе, как будто его пишут ----------- */
+  console.log('\n=== 65. код появляется в редакторе постепенно, а не одной вставкой ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
-    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 10000, cmMode: 'text/x-python',
-    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 12000, cmMode: 'text/x-python',
+    aiPaidText: 'def f(a):\n    if a > 0:\n        return a\n    return -a\n\nprint(f(int(input())))\n',
     afterRun: async (win, st) => {
       st.menu['✨ ИИ: решить текущий шаг']();
-      await new Promise((r) => setTimeout(r, 3000));
-      /* стрелка живёт около секунды и сама убирается — значит проверяем, что она
-         вообще создавалась и что её уносит за собой */
-      check('стрелка переноса создавалась', st.flew > 0, 'пролётов: ' + st.flew);
-      check('после переноса стрелка убрана',
-        !win.document.querySelector('.sgx-ai-fly'), 'осталась на экране');
-      check('правило анимации есть в стилях',
-        /\.sgx-ai-fly\{/.test(st.css || '') && /transition:transform/.test(st.css || ''),
+      await new Promise((r) => setTimeout(r, 7000));
+      /* вставка — это один вызов setValue, набор — столько, сколько строк */
+      check('текст переписывался несколько раз (набор, а не вставка)',
+        st.types > 2, 'вызовов: ' + st.types);
+      check('в итоге в редакторе всё решение',
+        /print\(f\(int\(input\(\)\)\)\)/.test(st.setValue || ''),
+        JSON.stringify((st.setValue || '').slice(-40)));
+      check('набор не тянется бесконечно — укладывается в пару секунд',
+        st.types > 0, 'вызовов: ' + st.types);
+      check('анимации-стрелки больше нет',
+        !(st.css || '').includes('.sgx-ai-fly'), 'правило стрелки осталось');
+    }
+  });
+
+  console.log('\n=== 65a. набор не задваивает код, если моста нет ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['writeCode'], `https://stepik.org/lesson/${LESSON}/step/8`);
+    /* мост в песочнице недоступен, поэтому writeCode уходит на запасные пути;
+       при наборе дописывающий путь должен быть отключён, иначе текст задвоится */
+    const first = probe.writeCode('a = 1', true);
+    probe.close();
+    check('при наборе вызов не бросает', !!first, 'упало');
+  }
+
+  /* --- 66. задание-галочка: варианты видны модели, ответ ставится ---------- */
+  console.log('\n=== 66. тест с выбором: варианты уходят модели, галочка ставится ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/2?unit=1818966`,
+    store: {}, submissions: [], html: CHOICE_ONLY_HTML, waitMs: 12000,
+    aiPaidText: 'static int Multiply(int a, int b)',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 6000));
+
+      check('запрос к ИИ ушёл', st.aiPaidCalls.length === 1, 'запросов: ' + st.aiPaidCalls.length);
+      const asked = st.aiPaidCalls[0] ? st.aiPaidCalls[0].body : '';
+      check('все четыре варианта попали в запрос',
+        ['static int Multiply()', 'static void Multiply(int a, int b)',
+          'void static Multiply(int, int)', 'static int Multiply(int a, int b)']
+          .every((t) => asked.indexOf(t) >= 0), 'вариантов в запросе нет');
+      check('про stdin и stdout при выборе не говорим', !/stdin/.test(asked),
+        'лишнее правило в запросе');
+      check('системный текст просит вернуть вариант, а не код',
+        /ТОЛЬКО текст выбранного варианта/.test(asked) && !/Код — целиком/.test(asked),
+        'системный текст не про выбор');
+
+      const inputs = Array.from(win.document.querySelectorAll('.quiz-component input[type=radio]'));
+      check('отмечен ровно один вариант', inputs.filter((i) => i.checked).length === 1,
+        'отмечено: ' + inputs.filter((i) => i.checked).length);
+      check('отмечен именно верный вариант',
+        !!(inputs[3] && inputs[3].checked), 'не тот вариант');
+      check('в ленте сказано про вариант, а не про редактор',
+        /Отметил вариант ответа/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 140));
+      check('«Запустить код» для теста не ищем',
+        !/Кнопку «Запустить код»/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 140));
+      check('код запускать нечего — кликов не было', st.ran === 0, 'кликов: ' + st.ran);
+      check('в редактор ничего не писалось', st.setValue === null, JSON.stringify(st.setValue));
+    }
+  });
+
+  console.log('\n=== 66a. ответ по номеру варианта тоже понимается ===');
+  {
+    const probe = probeSandbox(CHOICE_ONLY_HTML,
+      ['choiceFromText', 'choiceOptions'], `https://stepik.org/lesson/${LESSON}/step/2`);
+    const byText = probe.choiceFromText('static void Multiply(int a, int b)');
+    const byNum = probe.choiceFromText('Правильный вариант: 4');
+    const opts = probe.choiceOptions();
+    probe.close();
+    check('по тексту вариант найден',
+      !!byText && byText.answers.indexOf('static void Multiply(int a, int b)') >= 0,
+      byText ? JSON.stringify(byText.answers) : 'нет');
+    check('по номеру вариант найден',
+      !!byNum && byNum.ids.indexOf('104') >= 0, byNum ? JSON.stringify(byNum.ids) : 'нет');
+    check('вариантов ровно четыре', opts.length === 4, 'найдено: ' + opts.length);
+  }
+
+  /* --- 67. вывод запуска берётся из .code-runner__hints ------------------- */
+  console.log('\n=== 67. вывод запуска читается из настоящей разметки ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML,
+      ['runOutputText', 'stepErrorText'], `https://stepik.org/lesson/${LESSON}/step/8`);
+    const out = probe.runOutputText();
+    const err = probe.stepErrorText();
+    probe.close();
+    check('вывод найден в .code-runner__hints', out === '2', JSON.stringify(out));
+    check('вывод запуска НЕ выдаётся за отчёт проверки', !/^2$/.test(err.trim()),
+      JSON.stringify(err));
+  }
+
+  /* --- 68. имена переменных — простые ------------------------------------- */
+  console.log('\n=== 68. модель просят называть переменные просто ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+      const body = (st.aiPaidCalls[0] && st.aiPaidCalls[0].body) || '';
+      check('сказано про простые имена переменных', /Имена переменных — простые/.test(body),
         'правила нет');
-      check('код всё равно доехал до редактора',
-        /n % 2 == 0/.test(st.setValue || ''), JSON.stringify((st.setValue || '').slice(0, 60)));
+      check('перечислены примеры простых имён',
+        /a, b, c, n, x, number, text, result/.test(body), 'примеров нет');
+      check('запрещены профессиональные сокращения',
+        /word_count, idx, tmp, res, obj, cnt/.test(body), 'запрета нет');
+    }
+  });
+
+  /* --- 69. аватар — логотип отвечающей модели ----------------------------- */
+  console.log('\n=== 69. в аватаре — логотип той модели, что ответила ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiModel: 'kimi-k2.7-code', aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+      const imgs = Array.from(win.document.querySelectorAll('#sgx-ai-log .sgx-ai-ava img'));
+      check('в аватарах картинки', imgs.length >= 2, 'картинок: ' + imgs.length);
+      check('логотип именно выбранной модели',
+        imgs.length > 0 && imgs.every((i) => i.getAttribute('src') === 'https://i.imgur.com/y2H82HX.png'),
+        imgs.map((i) => i.getAttribute('src')).join(' '));
+      check('значка искры в аватаре больше нет',
+        !win.document.querySelector('#sgx-ai-log .sgx-ai-ava svg'), 'остался svg');
     }
   });
 
