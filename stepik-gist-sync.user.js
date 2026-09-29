@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.3.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, без ```-обёрток, с учётом уровня урока и с самопроверкой по тестовым данным. Если тесты не прошли — ИИ прочитает ошибку и попробует исправить сам.
+// @version      6.4.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Если тесты не прошли — ИИ прочитает ошибку и попробует исправить сам.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
@@ -30,10 +30,13 @@
  *  • На шаге, для которого решение уже есть, справа от карточки появляется скоба
  *    ( есть решение · вставить / нет ).
  *  • Где решения ещё нет, его подсказывает ИИ. Ответ появляется прямо в карточке
- *    задания — там же, где редактор кода, и в его стиле. Из ответа снимаются
- *    ```-обёртки и метка языка, поэтому он копируется одним нажатием. Модель знает,
- *    что уже проходили в уроке (текст лекции запоминается, пока её читают), держится
- *    этого уровня и сама сверяет вывод с тестовыми данными перед ответом.
+ *    задания — там же, где редактор кода, светлым блоком в стиле соседних панелей
+ *    Stepik, с крупным шрифтом. Из ответа снимаются ```-обёртки и метка языка,
+ *    поэтому он копируется одним нажатием. Модель знает, что уже проходили в уроке
+ *    (текст лекции запоминается, пока её читают), держится этого уровня и сама
+ *    сверяет вывод с тестовыми данными перед ответом. Модель можно переключить
+ *    прямо в блоке. Ответ, оборвавшийся по лимиту токенов, помечается как
+ *    неполный и в общее хранилище не попадает.
  *
  * ГДЕ ЛЕЖИТ
  *    Исходник и установка: https://github.com/NOTyeamu/Stepik-Fast-Complete
@@ -57,7 +60,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.3.0';
+  var VERSION = '6.4.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -765,18 +768,18 @@
   GM_addStyle([
     /* --- скоба «вставить»: контрастная, чтобы её было видно --- */
     '#sgx-chip{position:fixed;z-index:2147483000;display:none;align-items:stretch;pointer-events:none;',
-    'font:13.5px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
+    'font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
     '#sgx-chip.on{display:flex}',
     '#sgx-chip .sgx-brace{flex:none;display:block;overflow:visible}',
     '#sgx-chip.above .sgx-brace{display:none}',
     '#sgx-chip .sgx-body{display:flex;flex-direction:column;justify-content:center;gap:6px;padding:8px 12px;',
     'pointer-events:auto;background:#FFFFFF;border:1.5px solid #2F7CE0;border-radius:10px;',
     'box-shadow:0 3px 12px rgba(47,124,224,.25),0 1px 2px rgba(0,0,0,.10)}',
-    '#sgx-chip .sgx-label{color:#1F1D1B;font-weight:700}',
+    '#sgx-chip .sgx-label{color:#1F1D1B;font-weight:700;font-size:15px}',
     '#sgx-chip .sgx-acts{display:flex;align-items:center;gap:8px}',
     '#sgx-chip .sgx-sep{color:#C9C7C4}',
-    '#sgx-chip .sgx-act{border:0;border-radius:7px;padding:5px 11px;cursor:pointer;',
-    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px;font-weight:600;line-height:1.2;background:#2F7CE0;color:#fff}',
+    '#sgx-chip .sgx-act{border:0;border-radius:7px;padding:7px 13px;cursor:pointer;',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:14.5px;font-weight:600;line-height:1.2;background:#2F7CE0;color:#fff}',
     '#sgx-chip .sgx-act:hover{background:#2769C4}',
     '#sgx-chip .sgx-act.no{background:#EEF1F5;color:#3B3936}',
     '#sgx-chip .sgx-act.no:hover{background:#E1E7EE}',
@@ -791,45 +794,46 @@
     '.sgx-flash.off{opacity:0}',
     '#sgx-toast{position:fixed;left:50%;transform:translateX(-50%);bottom:20px;z-index:2147483000;',
     'display:none;max-width:min(420px,90vw);',
-    'padding:9px 12px;border-radius:8px;border:1px solid #E6E5E3;background:#FFF;color:#2C2C2B;',
-    'font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;box-shadow:0 1px 2px rgba(0,0,0,.05),0 4px 12px rgba(0,0,0,.06)}',
+    'padding:11px 14px;border-radius:8px;border:1px solid #E6E5E3;background:#FFF;color:#2C2C2B;',
+    'font:14.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;box-shadow:0 1px 2px rgba(0,0,0,.05),0 4px 12px rgba(0,0,0,.06)}',
     '#sgx-toast.on{display:block}',
     '#sgx-toast.err{background:#FCE9E7;border-color:#F3C8C3;color:#b23f34}',
     /* --- отчёт самопроверки --- */
     '#sgx-report{position:fixed;inset:0;z-index:2147483647;background:rgba(15,15,14,.45);display:flex;',
-    'align-items:center;justify-content:center;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
+    'align-items:center;justify-content:center;font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
     '#sgx-report .sgx-rep-box{background:#fff;border-radius:10px;box-shadow:0 18px 48px rgba(15,15,14,.25);',
     'padding:14px;width:min(620px,92vw);display:flex;flex-direction:column;gap:10px}',
     '#sgx-report textarea{width:100%;height:320px;resize:vertical;border:1px solid #E3E2E0;border-radius:6px;',
-    'padding:10px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#37352F;background:#FBFBFA}',
+    'padding:11px;font:13.5px/1.6 ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,Menlo,monospace;color:#37352F;background:#FBFBFA}',
     '#sgx-report .sgx-rep-row{display:flex;gap:8px;justify-content:flex-end}',
-    '#sgx-report button{border:1px solid #E3E2E0;background:#fff;border-radius:6px;padding:6px 12px;',
-    'font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#37352F;cursor:pointer}',
+    '#sgx-report button{border:1px solid #E3E2E0;background:#fff;border-radius:6px;padding:8px 14px;',
+    'font:14.5px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#37352F;cursor:pointer}',
     '#sgx-report button:hover{background:#F1F1EF}',
-    /* --- панель живёт ВНУТРИ бокового меню курса и выглядит как его часть --- */
+    /* --- панель живёт ВНУТРИ бокового меню курса и выглядит как его часть ---
+       Шрифты крупнее прежнего: на тёмном фоне мелкий текст расплывался.        */
     '#sgx-panel{position:relative;display:none;width:100%;box-sizing:border-box;',
-    'font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#fff}',
+    'font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#fff}',
     '#sgx-panel.on{display:block}',
     '#sgx-panel *{box-sizing:border-box}',
-    '#sgx-panel .sgx-module{display:flex;align-items:center;gap:8px;padding:12px 16px;',
+    '#sgx-panel .sgx-module{display:flex;align-items:center;gap:9px;padding:13px 16px;',
     'border-bottom:1px solid rgba(255,255,255,.08);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
-    '#sgx-panel .sgx-badge{display:flex;align-items:center;justify-content:center;width:22px;height:22px;',
-    'border-radius:50%;background:#4CAF50;color:#fff;font-size:11px;font-weight:700;flex:none}',
-    '#sgx-panel .sgx-modtitle{flex:1 1 auto;min-width:0;font-size:14px;font-weight:600;color:#fff}',
-    '#sgx-panel .sgx-close{display:flex;align-items:center;justify-content:center;width:24px;height:24px;',
+    '#sgx-panel .sgx-badge{display:flex;align-items:center;justify-content:center;width:24px;height:24px;',
+    'border-radius:50%;background:#4CAF50;color:#fff;font-size:12px;font-weight:700;flex:none}',
+    '#sgx-panel .sgx-modtitle{flex:1 1 auto;min-width:0;font-size:15.5px;font-weight:600;color:#fff}',
+    '#sgx-panel .sgx-close{display:flex;align-items:center;justify-content:center;width:28px;height:28px;',
     'border:0;border-radius:6px;background:transparent;color:rgba(255,255,255,.65);cursor:pointer;padding:0;flex:none}',
     '#sgx-panel .sgx-close:hover{background:rgba(255,255,255,.12);color:#fff}',
-    '#sgx-panel .sgx-row{display:flex;align-items:center;gap:8px;padding:10px 16px 4px}',
-    '#sgx-panel .sgx-row label{flex:0 0 auto;font-size:13px;color:rgba(255,255,255,.8)}',
-    '#sgx-panel select{flex:1 1 0;min-width:0;height:30px;padding:0 6px;border:1px solid rgba(255,255,255,.18);',
+    '#sgx-panel .sgx-row{display:flex;align-items:center;gap:9px;padding:11px 16px 4px}',
+    '#sgx-panel .sgx-row label{flex:0 0 auto;font-size:14px;color:rgba(255,255,255,.8)}',
+    '#sgx-panel select{flex:1 1 0;min-width:0;height:34px;padding:0 8px;border:1px solid rgba(255,255,255,.18);',
     'border-radius:6px;background:rgba(255,255,255,.06);color:#fff;',
-    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px}',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:14px}',
     '#sgx-panel select option{background:#fff;color:#1F1D1B}',
     '#sgx-panel select:focus{outline:2px solid rgba(120,190,255,.5);outline-offset:1px}',
-    '#sgx-panel .sgx-note{padding:8px 16px 6px;font-size:12px;color:rgba(255,255,255,.55);line-height:1.4}',
+    '#sgx-panel .sgx-note{padding:9px 16px 6px;font-size:13.5px;color:rgba(255,255,255,.55);line-height:1.45}',
     '#sgx-panel .sgx-btn{display:flex;align-items:center;justify-content:center;gap:8px;',
-    'width:calc(100% - 32px);margin:0 16px 8px;height:34px;border:1px solid transparent;border-radius:6px;padding:0;',
-    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px;font-weight:500;cursor:pointer;',
+    'width:calc(100% - 32px);margin:0 16px 8px;height:38px;border:1px solid transparent;border-radius:6px;padding:0;',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:14.5px;font-weight:500;cursor:pointer;',
     'transition:background .15s ease,color .15s ease}',
     '#sgx-panel .sgx-btn.primary{background:#fff;color:#1F1D1B}',
     '#sgx-panel .sgx-btn.primary:hover{background:#EDEDED}',
@@ -844,52 +848,59 @@
     '#sgx-panel .sgx-ic{flex:0 0 auto}',
     '#sgx-panel .sgx-progress{height:3px;background:rgba(255,255,255,.12);margin:2px 0 0}',
     '#sgx-panel .sgx-bar{height:100%;width:0;background:#4CAF50;transition:width .35s ease}',
-    '#sgx-panel .sgx-status{padding:10px 16px 14px;font-size:12.5px;color:rgba(255,255,255,.72);min-height:34px;line-height:1.45}',
+    '#sgx-panel .sgx-status{padding:11px 16px 15px;font-size:14px;color:rgba(255,255,255,.72);min-height:38px;line-height:1.5}',
     /* --- блок ИИ внутри панели: повторяет родной редактор кода Stepik --- */
     '#sgx-panel .sgx-ai[hidden]{display:none}',
     /* --- блок ИИ: живёт на месте редактора кода в карточке задания ---
-       Раньше он стоял в боковом меню рядом с настройками, и это было не то:
-       решение должно появляться там, где человек и ждёт код, — в области
-       .code-editor-quiz__editor. Поэтому блок оформлен как родной редактор:
-       светлая шапка с вкладкой «Код», кнопками копирования и сброса, меткой
-       языка и тёмным полем под код — как у Stepik.                             */
-    '#sgx-ai-root{display:none;width:100%;box-sizing:border-box;margin:10px 0 0;',
-    'border:1px solid #E3E3E1;border-radius:8px;background:#fff;overflow:hidden;',
-    'font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#2C2C2B}',
+       Оформлен как соседние панели Stepik («Тестовые данные», «Напишите
+       программу»): светлая карточка, серая полоса-шапка, вкладка «Код» белым
+       на ней, крупный текст. Тёмное поле убрано: рядом с родным светлым
+       редактором оно выглядело чужеродно, а мелкий шрифт на тёмном —
+       нечитаемо. Размеры подогнаны под сайт: 15px основной, 14px моно.      */
+    '#sgx-ai-root{display:none;width:100%;box-sizing:border-box;margin:14px 0 0;',
+    'border:1px solid #E5E5E5;border-radius:8px;background:#fff;overflow:hidden;',
+    'font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#2C2C2B}',
     '#sgx-ai-root.on{display:block}',
     '#sgx-ai-root *{box-sizing:border-box}',
     '#sgx-ai-panel .sgx-ai-head{display:flex;align-items:center;justify-content:space-between;',
-    'gap:8px;padding:7px 10px;background:#F7F7F6;border-bottom:1px solid #E3E3E1}',
-    '#sgx-ai-panel .sgx-ai-tabs{display:flex;align-items:center;gap:6px;margin:0;padding:0;list-style:none}',
-    '#sgx-ai-panel .sgx-ai-tab{display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:5px;',
-    'font-size:12.5px;font-weight:600;color:#4B4A47}',
-    '#sgx-ai-panel .sgx-ai-tab.active{color:#1F1D1B;background:#EAEAE8}',
+    'gap:10px;flex-wrap:wrap;padding:8px 12px;background:#F4F4F4;border-bottom:1px solid #E5E5E5}',
+    '#sgx-ai-panel .sgx-ai-tabs{display:flex;align-items:center;gap:8px;margin:0;padding:0;list-style:none}',
+    '#sgx-ai-panel .sgx-ai-tab{display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:6px;',
+    'font-size:15px;font-weight:600;color:#6B6A67;background:transparent;border:1px solid transparent}',
+    '#sgx-ai-panel .sgx-ai-tab.active{color:#1F1D1B;background:#fff;border-color:#E5E5E5}',
     '#sgx-ai-panel .sgx-ic{flex:0 0 auto}',
-    '#sgx-ai-panel .sgx-ai-tools{display:flex;align-items:center;gap:4px}',
-    '#sgx-ai-panel .sgx-ai-tool{display:flex;align-items:center;justify-content:center;width:26px;height:26px;',
-    'padding:0;border:0;border-radius:5px;background:transparent;color:#6B6A67;cursor:pointer}',
-    '#sgx-ai-panel .sgx-ai-tool:hover{background:#E6E6E4;color:#1F1D1B}',
-    '#sgx-ai-panel .sgx-ai-lang{padding:3px 9px;border-radius:5px;border:1px solid #E3E3E1;background:#fff;',
-    'font-size:11.5px;color:#5A5955}',
+    '#sgx-ai-panel .sgx-ai-tools{display:flex;align-items:center;gap:6px}',
+    '#sgx-ai-panel .sgx-ai-tool{display:flex;align-items:center;justify-content:center;width:30px;height:30px;',
+    'padding:0;border:0;border-radius:6px;background:transparent;color:#6B6A67;cursor:pointer}',
+    '#sgx-ai-panel .sgx-ai-tool:hover{background:#E6E6E6;color:#1F1D1B}',
+    '#sgx-ai-panel .sgx-ai-lang{padding:5px 10px;border-radius:6px;border:1px solid #E5E5E5;background:#fff;',
+    'font-size:13.5px;color:#5A5955;white-space:nowrap}',
     '#sgx-ai-panel .sgx-ai-lang.busy{color:#8A6D1F;border-color:#E8D9A8;background:#FDF7E3}',
-    /* лента: только чтение, ничего не печатается руками. Тёмное поле — как у
-       редактора кода на сайте, поэтому блок не выглядит чужеродным.            */
-    '#sgx-ai-panel .sgx-ai-log{max-height:44vh;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;',
-    'background:#2B2B2B}',
-    '#sgx-ai-panel .sgx-ai-msg{font-size:12.5px;line-height:1.5;color:rgba(255,255,255,.88)}',
-    '#sgx-ai-panel .sgx-ai-msg.me{align-self:flex-start;padding:6px 10px;border-radius:8px;',
-    'background:rgba(76,175,80,.18);color:#CFEBD2;font-size:12px}',
-    '#sgx-ai-panel .sgx-ai-msg.sys{color:rgba(255,255,255,.5);font-size:11.5px;font-style:italic}',
-    '#sgx-ai-panel .sgx-ai-code{margin:0;padding:10px 12px;border-radius:6px;background:rgba(0,0,0,.25);',
-    'color:#E8E8E8;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
+    /* выбор модели: такой же селект, как «Python 3.6» у самого Stepik рядом */
+    '#sgx-ai-panel .sgx-ai-model{height:30px;max-width:200px;padding:0 8px;border:1px solid #E5E5E5;border-radius:6px;',
+    'background:#fff;color:#2C2C2B;font-family:inherit;font-size:13.5px;cursor:pointer}',
+    '#sgx-ai-panel .sgx-ai-model:hover{border-color:#C9C9C7}',
+    '#sgx-ai-panel .sgx-ai-model:focus{outline:2px solid #9CC4F0;outline-offset:1px}',
+    /* лента: только чтение, ничего не печатается руками. Светлая, как родной
+       редактор кода, поэтому блок читается как его продолжение.              */
+    '#sgx-ai-panel .sgx-ai-log{max-height:46vh;overflow:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px;',
+    'background:#fff}',
+    '#sgx-ai-panel .sgx-ai-msg{font-size:15px;line-height:1.6;color:#2C2C2B}',
+    '#sgx-ai-panel .sgx-ai-msg.me{align-self:flex-start;padding:8px 12px;border-radius:8px;',
+    'background:#EDF6EE;color:#1F4D28;font-size:14px}',
+    '#sgx-ai-panel .sgx-ai-msg.sys{color:#8A8880;font-size:13.5px}',
+    '#sgx-ai-panel .sgx-ai-code{margin:0;padding:12px 14px;border-radius:8px;background:#F7F7F6;',
+    'border:1px solid #ECECEA;color:#1F1D1B;',
+    'font:14px/1.65 ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,Menlo,monospace;',
     'white-space:pre-wrap;overflow-wrap:anywhere}',
-    '#sgx-ai-panel .sgx-ai-err{margin:0;padding:9px 11px;border-radius:6px;background:rgba(229,115,115,.16);',
-    'border-left:3px solid #E57373;color:#F6D8D8;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
+    '#sgx-ai-panel .sgx-ai-err{margin:0;padding:10px 12px;border-radius:8px;background:#FDECEA;',
+    'border-left:4px solid #E05B4B;color:#8C2F22;',
+    'font:13.5px/1.6 ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,Menlo,monospace;',
     'white-space:pre-wrap;overflow-wrap:anywhere}',
     /* «думает» — живой индикатор, чтобы было видно, что работа идёт */
-    '#sgx-ai-panel .sgx-ai-think{display:flex;align-items:center;gap:7px;font-size:12px;color:rgba(255,255,255,.6)}',
+    '#sgx-ai-panel .sgx-ai-think{display:flex;align-items:center;gap:8px;font-size:14px;color:#8A8880}',
     '#sgx-ai-panel .sgx-ai-dots{display:inline-flex;gap:3px}',
-    '#sgx-ai-panel .sgx-ai-dots span{width:5px;height:5px;border-radius:50%;background:currentColor;',
+    '#sgx-ai-panel .sgx-ai-dots span{width:6px;height:6px;border-radius:50%;background:currentColor;',
     'animation:sgx-blink 1.2s ease-in-out infinite}',
     '#sgx-ai-panel .sgx-ai-dots span:nth-child(2){animation-delay:.2s}',
     '#sgx-ai-panel .sgx-ai-dots span:nth-child(3){animation-delay:.4s}',
@@ -1600,6 +1611,9 @@ async function jobCollect(ctx, target) {
   var AI_GAP_PAID = 1500;              /* то же самое для своего канала */
   var AI_WAIT_MAX = 3;                 /* столько секунд паузы пережидаем внутри, а не пропускаем канал */
   var AI_TRIES = 2;                    /* попыток на канал */
+  /* Сколько ждём ответ. Без этого «думал две минуты» ничем не заканчивалось:
+     запрос висел, а человек не понимал, работает скрипт или умер.              */
+  var AI_TIMEOUT = 90000;
 
   /* Канал один — свой, по ключу. Бесплатный (text.pollinations.ai) убран: у него
      анонимный тариф отвечал 402 через раз, а решение нужно здесь и сейчас.        */
@@ -1613,7 +1627,9 @@ async function jobCollect(ctx, target) {
         return {
           model: model,
           messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-          max_tokens: 4000,
+          /* 4000 не хватало: на задании с теорией в запросе модель упиралась
+             в лимит и присылала «```python\ndef» — огрызок вместо решения.      */
+          max_tokens: 8000,
           private: true
         };
       }
@@ -1666,6 +1682,39 @@ async function jobCollect(ctx, target) {
 
   function saveAi() {
     try { GM_setValue(AI_KEY, JSON.stringify(aiAnswer)); } catch (e) { /* ignore */ }
+  }
+
+  /* ------------------------------------------------------------ выбор модели */
+
+  /* Какую модель звать. Список берём из канала, выбор человека помним в хранилище.
+     Если сохранённой модели в списке больше нет — молча возвращаемся к первой,
+     иначе в теле запроса уехало бы имя, которого сервис не знает.               */
+  var AI_MODEL_KEY = 'aiModel';
+
+  function aiModelList() {
+    var ch = AI_CHANNELS[0];
+    return ch && ch.models ? ch.models.slice() : [];
+  }
+
+  function aiModel() {
+    var saved = '';
+    try { saved = String(GM_getValue(AI_MODEL_KEY, '') || ''); } catch (e) { saved = ''; }
+    var list = aiModelList();
+    return list.indexOf(saved) >= 0 ? saved : (list[0] || '');
+  }
+
+  function setAiModel(name) {
+    if (aiModelList().indexOf(name) < 0) return;
+    try { GM_setValue(AI_MODEL_KEY, name); } catch (e) { /* ignore */ }
+  }
+
+  /* Порядок перебора: сначала выбранная модель, потом остальные как запасные —
+     если выбранная молчит или обрезает ответ, шанс всё равно остаётся.          */
+  function modelsFor(ch) {
+    var all = (ch && ch.models) || [];
+    var want = aiModel();
+    if (all.indexOf(want) < 0) return all;
+    return [want].concat(all.filter(function (m) { return m !== want; }));
   }
 
   /* Пауза между запросами к своему каналу — чтобы не долбить сервис в цикле. */
@@ -1838,8 +1887,12 @@ async function jobCollect(ctx, target) {
       if (one && one[2] && one[2].trim()) { s = one[2].trim(); paired = true; }
     }
 
-    /* '''Python''' / """python""" — Python-строки-ограждения */
-    var quote = s.match(/^['"]{3}\s*[A-Za-z0-9+#.\-]*\s*\n?([\s\S]*?)\n?['"]{3}\s*$/);
+    /* '''Python''' / """python""" — Python-строки-ограждения. Метка бывает и
+       ЗАКРЫТА теми же кавычками: «'''Python'''\nкод\n'''» — именно так пишет
+       модель, и раньше это разбиралось только построчной чисткой, которая
+       заодно вырезала кавычки докстрингов. Поэтому закрывающие кавычки после
+       метки допускаем прямо здесь.                                            */
+    var quote = s.match(/^['"]{3}\s*[A-Za-z0-9+#.\-]*\s*(?:['"]{3})?\s*\n?([\s\S]*?)\n?['"]{3}\s*$/);
     if (quote && quote[1] && quote[1].trim()) { s = quote[1].trim(); paired = true; }
 
     /* остатки: строка-метка языка (одно слово) в начале или конце */
@@ -1851,13 +1904,43 @@ async function jobCollect(ctx, target) {
 
     /* Одиночные ограждения по краям убираем только когда была настоящая пара:
        иначе «```python» без продолжения превратилось бы в «python» — то есть
-       в мусор, который выглядит как код.                                        */
+       в мусор, который выглядит как код.
+
+       И только края, и только БЭКТИКИ. Раньше здесь был проход по всем строкам
+       (`/^\s*(?:```|'''|""")\s*$/gm`), и он вырезал кавычки у многострочного
+       докстринга:
+           def f():
+               """
+               Считает.
+               """
+       превращалось в код без кавычек — то есть в синтаксическую ошибку.
+       Одинарные и двойные кавычки в Python — это строки, их трогать нельзя.     */
     if (!paired) return s;
-    var stripped = s
-      .replace(/^\s*(?:```|'''|""")\s*$/gm, '')
-      .replace(/^\s*(?:```|'''|""")\s*|\s*(?:```|'''|""")\s*$/g, '')
-      .replace(/^\s*\n+|\n+\s*$/g, '');
+    var fenceOnly = /^\s*```+\s*$/;             /* строка только из бэктиков */
+    var out = s.split('\n');
+    while (out.length && fenceOnly.test(out[0])) out.shift();
+    while (out.length && fenceOnly.test(out[out.length - 1])) out.pop();
+    var stripped = out.join('\n').replace(/^\s*\n+|\n+\s*$/g, '');
     return stripped.trim() ? stripped : orig;
+  }
+
+  /* Ответ оборвался по лимиту токенов. Снаружи это выглядит как «модель написала
+     одно слово»: приходит «```python\ndef» — ограждение снимается, и в ленте
+     остаётся «def» как будто это решение. Провайдер честно сообщает причину
+     в finish_reason, поэтому запоминаем её и говорим человеку прямо.            */
+  function looksTruncated(text, finish) {
+    if (finish === 'length') return true;
+    /* Провайдер прямо сказал «ответ закончен» — верим ему и не гадаем по тексту:
+       иначе короткое, но верное решение («print(1)») выглядело бы обрезанным.   */
+    if (finish) return false;
+    var t = String(text || '').trim();
+    if (!t) return false;
+    /* finish_reason провайдер не прислал вовсе: тогда единственная зацепка —
+       объявление функции без тела. Именно так выглядел огрызок «def».          */
+    if (t.indexOf('\n') < 0 && t.length < 24 && /^(def|class|for|while|if|print|import|from)\b/.test(t)) {
+      return /(?:\(|:)$/.test(t);
+    }
+    return false;
   }
 
   /* Человеку показываем «Python 3.6», а не «text/x-python»: в панели рядом со
@@ -2063,15 +2146,25 @@ async function jobCollect(ctx, target) {
     var tries = retry ? AI_TRIES : 1;
     var key = ch.needKey ? aiKey() : '';
     var lastErr = null;
-    for (var i = 0; i < ch.models.length; i++) {
-      var model = ch.models[i];
+    var list = modelsFor(ch);
+    for (var i = 0; i < list.length; i++) {
+      var model = list[i];
       for (var attempt = 0; attempt < tries; attempt++) {
+        /* Свой таймер на попытку: без него зависший запрос висит бесконечно,
+           и «ИИ думает» можно смотреть сколько угодно.                          */
+        var ctrl = null, timer = null;
+        if (typeof AbortController === 'function') {
+          ctrl = new AbortController();
+          timer = setTimeout(function () { try { ctrl.abort(); } catch (e) { /* ignore */ } }, AI_TIMEOUT);
+        }
         try {
-          var res = await fetch(ch.url, {
+          var opts = {
             method: 'POST',
             headers: ch.headers(key),
             body: JSON.stringify(ch.body(model, system || aiSystem(), user || aiUser(ctx)))
-          });
+          };
+          if (ctrl) opts.signal = ctrl.signal;
+          var res = await fetch(ch.url, opts);
           if (!res.ok) {
             lastErr = new Error(aiErrorText(res.status) + ' · ' + model);
             lastErr.status = res.status;
@@ -2081,16 +2174,27 @@ async function jobCollect(ctx, target) {
             continue;
           }
           var data = await res.json();
-          var msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
+          var choice = (data.choices && data.choices[0]) || {};
+          var msg = choice.message || {};
           var text = String(msg.content || '').trim();
           /* reasoning-модель могла не успеть доехать до ответа — тогда берём
              размышления как есть, лучше, чем ничего */
           if (!text && msg.reasoning_content) text = String(msg.reasoning_content).trim();
           if (!text) { lastErr = new Error('пустой ответ от ' + model); if (retry) await sleep(700); continue; }
-          return { text: text, model: (data.model || model), channel: ch.id };
+          return {
+            text: text, model: (data.model || model), channel: ch.id,
+            /* провайдер сам говорит, что упёрся в лимит: «length» вместо «stop».
+               Это единственный надёжный признак обрезанного ответа.            */
+            truncated: looksTruncated(text, choice.finish_reason)
+          };
         } catch (e) {
-          lastErr = e;
+          /* Прервали по таймауту — объясняем понятно, а не «signal is aborted». */
+          lastErr = (e && (e.name === 'AbortError' || /abort/i.test(e.message || '')))
+            ? new Error('сервис ИИ не ответил за ' + Math.round(AI_TIMEOUT / 1000) + ' с · ' + model)
+            : e;
           if (retry) await sleep(700);
+        } finally {
+          if (timer) clearTimeout(timer);
         }
       }
     }
@@ -2168,13 +2272,24 @@ async function jobCollect(ctx, target) {
       var clean = stripFences(got.text) || got.text;
       aiAnswer = {
         key: ctx.key, text: clean, at: Date.now(), model: got.model,
-        kind: kind, lang: stepLanguage()
+        kind: kind, lang: stepLanguage(), truncated: !!got.truncated
       };
       dropThink(thinking);
       saveAi();
-      setStatus((fixed ? 'ИИ: исправленное решение готово (шаг ' : 'ИИ: решение готово (шаг ') + ctx.step + ')');
       renderPanel(true);
       aiLogAnswer();
+
+      /* Ответ упёрся в лимит токенов. Раньше это выглядело как «модель написала
+         одно слово»: в ленте оставался огрызок вроде «def», и он же уезжал
+         в общее хранилище как готовое решение. Теперь лента помечает ответ
+         неполным (см. aiLogAnswer), а в хранилище он не попадает вовсе —
+         чужой огрызок хуже, чем ничего.                                        */
+      if (got.truncated) {
+        setStatus('ИИ: ответ оборвался по лимиту — попробуй ещё раз или смени модель');
+        return;
+      }
+
+      setStatus((fixed ? 'ИИ: исправленное решение готово (шаг ' : 'ИИ: решение готово (шаг ') + ctx.step + ')');
       /* Кладём решение в общее хранилище — иначе кнопка «вставить» ищет ответ в
          папке answers/, не находит и отвечает «в хранилище нет ответа». Заодно
          решение уезжает остальным. Тихо: неудача публикации не должна ломать показ. */
@@ -2233,7 +2348,8 @@ async function jobCollect(ctx, target) {
 
     aiAnswer = {
       key: ctx.key, text: stripFences(got.text) || got.text, at: Date.now(), model: got.model,
-      kind: aiAnswer.kind || 'code', lang: aiAnswer.lang || stepLanguage()
+      kind: aiAnswer.kind || 'code', lang: aiAnswer.lang || stepLanguage(),
+      truncated: !!got.truncated
     };
     saveAi();
     aiLogAnswer();
@@ -2243,6 +2359,10 @@ async function jobCollect(ctx, target) {
     /* Правку показываем только в ленте, но в панели уже стоит новое решение:
        человек сам решает, отправлять его повторно или нет. Автоматически не
        жмём «Отправить» — отправка наружу только по подтверждению.               */
+    if (got.truncated) {
+      setStatus('ИИ: исправление оборвалось по лимиту — смени модель и повтори');
+      return { skipped: 'ответ обрезан' };
+    }
     setStatus('ИИ: решение исправлено — проверь и отправь снова');
     saveAiToStore(ctx).catch(function (e) { log('публикация правки ИИ не удалась: ' + e.message); });
     return { fixed: true };
@@ -2298,6 +2418,12 @@ async function jobCollect(ctx, target) {
   async function saveAiToStore(ctx) {
     if (!aiAnswer || aiAnswer.key !== ctx.key || !aiAnswer.text) return { skipped: true };
     if (!cfg.token) return { skipped: true };          /* без токена публиковать некуда */
+    /* Обрезанный ответ не публикуем: он уедет всем, и на этом шаге в папке
+       останется огрызок вроде «def». Огрызок хуже, чем ничего.                  */
+    if (aiAnswer.truncated) {
+      log('решение ИИ обрезано по лимиту — в хранилище не кладу');
+      return { skipped: 'ответ обрезан' };
+    }
     var kind = aiAnswer.kind === 'choice' ? 'choice' : 'code';
     var content = aiAnswer.text;
     /* У теста с выбором ответ модели — текст, а хранилищу нужны варианты. Если
@@ -2428,7 +2554,12 @@ async function jobCollect(ctx, target) {
   function aiLogAnswer() {
     if (!aiAnswer || !aiAnswer.text) return;
     aiLogAdd(aiAnswer.text, '', true);
-    aiLogAdd('проверь перед отправкой · ' + (aiViaText() ? aiViaText() + ' · ' : '') + aiAnswer.model, 'sys');
+    if (aiAnswer.truncated) {
+      aiLogAdd('⚠ ответ неполный — оборвался по лимиту. Это не решение целиком:\n' +
+        'нажми «Спросить ИИ» ещё раз или выбери другую модель.', 'err');
+    } else {
+      aiLogAdd('проверь перед отправкой · ' + (aiViaText() ? aiViaText() + ' · ' : '') + aiAnswer.model, 'sys');
+    }
     var lang = document.getElementById('sgx-ai-lang');
     if (lang) lang.textContent = langLabel(aiAnswer.lang || '');
     aiMarkVerifying(false);
@@ -2764,7 +2895,7 @@ async function jobCollect(ctx, target) {
      Раньше он был частью панели настроек в боковом меню. Это неправильное место:
      решение — это код, а код на Stepik живёт в редакторе. Поэтому блок стоит
      прямо под редактором, в области .quiz-plugin, и выглядит как его продолжение:
-     вкладка «Код», копирование, сброс и метка языка.                            */
+     вкладка «Код», копирование, сброс, метка языка и выбор модели.              */
   function ensureAiRoot() {
     if (document.getElementById('sgx-ai-root')) return document.getElementById('sgx-ai-root');
     var root = document.createElement('div');
@@ -2780,14 +2911,18 @@ async function jobCollect(ctx, target) {
       '<button class="sgx-ai-tool" id="sgx-ai-reset" type="button" title="Сбросить">' +
       icon('broom', 14) + '</button>',
       '<span class="sgx-ai-lang" id="sgx-ai-lang">ИИ</span>',
+      /* Модель меняется здесь же, рядом с решением: если одна отвечает медленно
+         или обрывает ответ по лимиту, человек тут же переключается и повторяет
+         запрос, не уходя в меню Tampermonkey.                                  */
+      '<select class="sgx-ai-model" id="sgx-ai-model" title="Модель ИИ"></select>',
       '</div></div>',
       '<div class="sgx-ai-log" id="sgx-ai-log"></div>',
       '</div>'
     ].join('');
 
     /* Кнопки блока — как в родном редакторе Stepik: скопировать решение и сбросить
-       ленту. Печатать здесь нечего, поэтому кроме этих двух действий в блоке
-       ничего не нажимается.                                                      */
+       ленту. Печатать здесь нечего, поэтому кроме этих двух действий и выбора
+       модели в блоке ничего не нажимается.                                       */
     root.querySelector('#sgx-ai-copy').addEventListener('click', function () {
       var ctx = stepContext();
       var text = (ctx && aiAnswerAt(ctx.key)) || (aiAnswer && aiAnswer.text) || '';
@@ -2798,7 +2933,39 @@ async function jobCollect(ctx, target) {
       aiLogClear();
       aiShow(false);
     });
+    aiFillModels(root);
+    root.querySelector('#sgx-ai-model').addEventListener('change', function () {
+      setAiModel(this.value);
+      toast('Модель ИИ: ' + this.value);
+      /* Ответ прошлой модели больше не «текущий» — иначе «вставить» подставит
+         решение, принятое другой моделью, а человек будет думать, что это новое. */
+      var ctx = stepContext();
+      if (ctx && aiAnswer && aiAnswer.key === ctx.key) {
+        aiLogAdd('модель переключена на ' + this.value + ' — нажми «Спросить ИИ» заново', 'sys');
+      }
+    });
     return root;
+  }
+
+  /* Наполнить список моделей. Список берём из канала, выбранную отмечаем —
+     и при каждом показе блока тоже, чтобы селект не разошёлся с настройкой.     */
+  function aiFillModels(root) {
+    var sel = (root || document).querySelector('#sgx-ai-model');
+    if (!sel) return null;
+    var list = aiModelList();
+    var want = aiModel();
+    var have = Array.prototype.map.call(sel.options, function (o) { return o.value; }).join(',');
+    if (have !== list.join(',')) {
+      sel.innerHTML = '';
+      list.forEach(function (name) {
+        var o = document.createElement('option');
+        o.value = name;
+        o.textContent = name;
+        sel.appendChild(o);
+      });
+    }
+    sel.value = want;
+    return sel;
   }
 
   /* Куда класть блок ИИ. Ищем место внутри карточки задания, вплотную к редактору
@@ -2837,6 +3004,9 @@ async function jobCollect(ctx, target) {
     } else if (root.parentNode !== host) {
       host.appendChild(root);
     }
+    /* список моделей держим в согласии с настройкой: блок переставляется при
+       каждой смене шага, и селект не должен показывать старое значение.        */
+    aiFillModels(root);
     return root;
   }
 

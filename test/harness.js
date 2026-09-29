@@ -108,7 +108,11 @@ function makeFetch(state) {
       const msg = state.aiPaidEmpty
         ? { role: 'assistant', content: '', reasoning_content: 'думал-думал' }
         : { role: 'assistant', content: answerText };
-      return ok({ choices: [{ message: msg }], model: model, __asked: asked }, 'json');
+      /* Настоящий сервис всегда присылает finish_reason: «stop» — ответ целый,
+         «length» — упёрся в лимит и оборван. Без него скрипт не отличил бы
+         огрызок вроде «def» от короткого верного решения.                     */
+      const finish = state.aiFinishReason || (state.aiTruncated ? 'length' : 'stop');
+      return ok({ choices: [{ message: msg, finish_reason: finish }], model: model, __asked: asked }, 'json');
     }
 
     /* --- Stepik --- */
@@ -132,7 +136,7 @@ function makeFetch(state) {
   };
 }
 
-function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiPaidDown, aiPaidText, aiPaidEmpty, aiKey, aiPaidQueue, checkHint, checkHintAt, cmMode, seedTheory }) {
+function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiPaidDown, aiPaidText, aiPaidEmpty, aiKey, aiPaidQueue, checkHint, checkHintAt, cmMode, seedTheory, aiTruncated, aiModel, aiFinishReason }) {
   return new Promise((resolve, reject) => {
     const dom = new JSDOM(html, { url, runScripts: 'dangerously', pretendToBeVisual: true });
     const { window } = dom;
@@ -143,11 +147,14 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       setValue: null, submitted: 0, retried: 0, docBlob: null, shots: 0,
       aiPaidCalls: [], aiPaidDown: !!aiPaidDown, aiPaidText: aiPaidText,
       aiPaidEmpty: !!aiPaidEmpty, aiPaidQueue: aiPaidQueue || [],
-      cmMode: cmMode || '',
+      aiTruncated: !!aiTruncated, aiFinishReason: aiFinishReason || '',
+      cmMode: cmMode || '', css: '',
       storage: { writeToken: token === undefined ? 'github_pat_11TEST' : token }
     };
     if (job) state.storage.job = JSON.stringify(job);
     if (aiKey !== undefined) state.storage.aiKey = aiKey;
+    /* выбранная в панели модель тоже живёт в хранилище */
+    if (aiModel !== undefined) state.storage.aiModel = aiModel;
     /* Теорию урока скрипт запоминает, пока её читают, и достаёт на задании.
        Чтобы проверить это без второго прогона, кладём кэш заранее — так же, как
        его оставил бы прочитанный урок.                                           */
@@ -228,7 +235,8 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       window, window.document, window.location, makeFetch(state), console, window.navigator,
       (k, d) => (k in state.storage ? state.storage[k] : d),
       (k, v) => { state.storage[k] = v; },
-      () => {}, (name, fn) => { state.menu[name] = fn; },
+      (css) => { state.css = (state.css || '') + String(css || ''); },
+      (name, fn) => { state.menu[name] = fn; },
       window.CustomEvent, window.Event, window.KeyboardEvent, window.MouseEvent, window.PopStateEvent,
       window.HTMLTextAreaElement, window.HTMLInputElement, TextEncoder, btoa, atob,
       window.html2canvas, JSZip, window.URL,
@@ -1739,6 +1747,182 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
         JSON.stringify(st.setValue || ''));
     }
   });
+
+  /* --- 45. обрезанный ответ не выдаётся за решение и не уезжает в хранилище ---
+     Ровно то, что человек увидел на скриншоте: модель упёрлась в лимит токенов
+     и прислала «```python\ndef». Ограждение снималось, и в ленте оставался
+     огрызок «def» как будто это решение. Провайдер сообщает причину
+     в finish_reason — теперь её читаем.                                       */
+  console.log('\n=== 45. обрезанный ответ помечается и не публикуется ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: '```python\ndef',
+    aiFinishReason: 'length',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3000));
+
+      const feed = aiFeedText(win, st);
+      check('в ленте сказано, что ответ неполный', /оборвал|неполн/i.test(feed), feed.slice(0, 120));
+      check('сказано, что в хранилище не кладут', /не кладу|неполн/i.test(feed), feed.slice(0, 120));
+      check('огрызок НЕ опубликован в очередь', Object.keys(st.inbox).length === 0,
+        Object.keys(st.inbox).join(',') || 'очередь пуста');
+      check('в статусе сказано про лимит', /лимит/.test(statusText(win)), statusText(win));
+      check('предложено сменить модель или повторить',
+        /смени модель|ещё раз/i.test(statusText(win) + feed), statusText(win));
+    }
+  });
+
+  console.log('\n=== 45a. короткий, но целый ответ обрезанным не считается ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'print(1)',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3000));
+      const feed = aiFeedText(win, st);
+      check('однострочное решение не объявлено обрезанным', !/оборвал|неполн/i.test(feed), feed.slice(0, 120));
+      check('оно опубликовано как обычно', Object.keys(st.inbox).length === 1,
+        Object.keys(st.inbox).join(',') || 'ничего не ушло');
+    }
+  });
+
+  /* --- 46. модель выбирается прямо в блоке ИИ ------------------------------- */
+  console.log('\n=== 46. модель переключается из блока рядом с редактором ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+
+      const sel = win.document.querySelector('#sgx-ai-model');
+      check('в блоке ИИ есть выбор модели', !!sel, 'селекта нет');
+      check('в списке обе модели канала',
+        sel && sel.options.length === 2 &&
+        Array.from(sel.options).map((o) => o.value).join(',') === 'glm-5.3-flash,deepseek-v4-flash',
+        sel ? Array.from(sel.options).map((o) => o.value).join(',') : '—');
+      check('по умолчанию выбрана первая модель', sel && sel.value === 'glm-5.3-flash',
+        sel ? sel.value : '—');
+
+      /* переключаем и просим снова — в теле запроса должно быть новое имя */
+      sel.value = 'deepseek-v4-flash';
+      sel.dispatchEvent(new win.Event('change', { bubbles: true }));
+      check('выбор сохранён в настройках', st.storage.aiModel === 'deepseek-v4-flash',
+        String(st.storage.aiModel));
+
+      const before = st.aiPaidCalls.length;
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2500));
+      const last = st.aiPaidCalls[st.aiPaidCalls.length - 1];
+      const sent = last ? JSON.parse(last.body).model : '';
+      check('в запрос ушла выбранная модель', sent === 'deepseek-v4-flash', sent || 'запроса нет');
+      check('сделан ещё один запрос', st.aiPaidCalls.length > before,
+        st.aiPaidCalls.length + ' против ' + before);
+    }
+  });
+
+  console.log('\n=== 46a. сохранённая модель подхватывается при следующем запуске ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 8000, cmMode: 'text/x-python',
+    aiModel: 'deepseek-v4-flash', aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+      const sel = win.document.querySelector('#sgx-ai-model');
+      check('селект показывает сохранённую модель', sel && sel.value === 'deepseek-v4-flash',
+        sel ? sel.value : '—');
+      const sent = st.aiPaidCalls[0] ? JSON.parse(st.aiPaidCalls[0].body).model : '';
+      check('запрос пошёл на сохранённую модель', sent === 'deepseek-v4-flash', sent || 'нет');
+    }
+  });
+
+  console.log('\n=== 46b. неизвестная модель из настроек не уезжает в запрос ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 8000, cmMode: 'text/x-python',
+    aiModel: 'gpt-из-будущего', aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+      const sent = st.aiPaidCalls[0] ? JSON.parse(st.aiPaidCalls[0].body).model : '';
+      check('незнакомое имя заменено на рабочую модель', sent === 'glm-5.3-flash', sent || 'нет');
+      const sel = win.document.querySelector('#sgx-ai-model');
+      check('селект тоже показывает рабочую модель', sel && sel.value === 'glm-5.3-flash',
+        sel ? sel.value : '—');
+    }
+  });
+
+  /* --- 47. оформление и читаемость ----------------------------------------- */
+  console.log('\n=== 47. блок ИИ светлый и с крупным шрифтом, как соседние панели ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 8000, cmMode: 'text/x-python',
+    aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 1500));
+
+      const css = st.css || '';
+      check('стили вообще доехали до страницы', css.length > 500, 'символов: ' + css.length);
+      const rule = (sel) => {
+        const i = css.indexOf(sel + '{');
+        return i < 0 ? '' : css.slice(i, css.indexOf('}', i) + 1);
+      };
+
+      /* тёмное поле убрано: рядом с родным светлым редактором оно было чужеродным */
+      const log = rule('#sgx-ai-panel .sgx-ai-log');
+      check('лента блока светлая', /background:#fff/i.test(log), log);
+      check('тёмного фона у ленты больше нет', !/background:#2B2B2B/i.test(log), log);
+
+      const code = rule('#sgx-ai-panel .sgx-ai-code');
+      check('код тёмным по светлому, а не наоборот', /color:#1F1D1B/i.test(code), code);
+      check('шрифт кода не меньше 14px', /font:14px/.test(code), code);
+
+      const msg = rule('#sgx-ai-panel .sgx-ai-msg');
+      check('шрифт ленты не меньше 15px', /font-size:15px/.test(msg), msg);
+
+      const tab = rule('#sgx-ai-panel .sgx-ai-tab');
+      check('шрифт вкладки не меньше 15px', /font-size:15px/.test(tab), tab);
+      check('активная вкладка белая, как у Stepik',
+        /background:#fff/i.test(rule('#sgx-ai-panel .sgx-ai-tab.active')),
+        rule('#sgx-ai-panel .sgx-ai-tab.active'));
+
+      /* шрифты подняты и в остальных местах — человек просил «везде» */
+      const panel = rule('#sgx-panel');
+      check('шрифт панели не меньше 15px', /font:15px/.test(panel), panel);
+      check('шрифт статуса не меньше 14px', /font-size:14px/.test(rule('#sgx-panel .sgx-status')),
+        rule('#sgx-panel .sgx-status'));
+      check('шрифт скобы не меньше 15px', /font:15px/.test(rule('#sgx-chip')), rule('#sgx-chip'));
+      check('шрифт тоста не меньше 14px', /font:14\.5px/.test(rule('#sgx-toast')), rule('#sgx-toast'));
+      check('шрифт отчёта не меньше 15px', /font:15px/.test(rule('#sgx-report')), rule('#sgx-report'));
+      check('селект модели оформлен как родной',
+        /border:1px solid #E5E5E5/.test(rule('#sgx-ai-panel .sgx-ai-model')),
+        rule('#sgx-ai-panel .sgx-ai-model'));
+    }
+  });
+
+  /* --- 48. докстринг не ломается при снятии ограждений --------------------- */
+  console.log('\n=== 48. многострочный докстринг выживает после чистки ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['stripFences'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    const body = 'def f():\n    """\n    Считает.\n    """\n    return 1';
+    const got = probe.stripFences('```python\n' + body + '\n```');
+    probe.close();
+    check('кавычки докстринга на месте', /"""\n    Считает\.\n    """/.test(got), JSON.stringify(got));
+    check('код не пострадал', /return 1/.test(got), JSON.stringify(got));
+
+    const probe2 = probeSandbox(QUIZ_PLUGIN_HTML, ['stripFences'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    const got2 = probe2.stripFences('```python\ndef');
+    probe2.close();
+    check('огрызок без закрывающего ограждения не портится', got2 === 'def', JSON.stringify(got2));
+  }
 
   const failed = results.filter((r) => !r.ok);
   console.log('\n=== ИТОГ: ' + (results.length - failed.length) + '/' + results.length + ' проверок пройдено ===');
