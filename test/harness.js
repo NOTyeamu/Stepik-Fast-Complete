@@ -148,7 +148,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       calls: [], inbox: {}, inboxMessages: [], menu: {},
       store: Object.assign({}, store || {}), submissions: submissions || [],
       storeDown: !!storeDown, emptyLessonSteps: !!emptyLessonSteps,
-      setValue: null, submitted: 0, retried: 0, ran: 0, docBlob: null, shots: 0,
+      setValue: null, submitted: 0, retried: 0, ran: 0, flew: 0, docBlob: null, shots: 0,
       aiPaidCalls: [], aiPaidDown: !!aiPaidDown, aiPaidText: aiPaidText,
       aiPaidEmpty: !!aiPaidEmpty, aiPaidQueue: aiPaidQueue || [],
       aiTruncated: !!aiTruncated, aiFinishReason: aiFinishReason || '',
@@ -212,6 +212,15 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       if (cl.contains('attempt-wrapper-button_run') || cl.contains('run')) state.ran++;
       if (cl.contains('retry')) state.retried++;
     });
+
+    /* Стрелка переноса живёт меньше секунды и сама себя убирает, поэтому
+       «поймать» её можно только в момент появления — считаем вставки в body. */
+    const mo = new window.MutationObserver((muts) => {
+      muts.forEach((m) => Array.prototype.forEach.call(m.addedNodes, (n) => {
+        if (n.classList && n.classList.contains('sgx-ai-fly')) state.flew++;
+      }));
+    });
+    mo.observe(window.document.body, { childList: true });
 
     const cmNode = window.document.querySelector('.CodeMirror');
     if (cmNode) mkCm(cmNode);
@@ -686,6 +695,8 @@ const QUIZ_PLUGIN_HTML = `<!doctype html><html><body>
           </div>
           <div id="ember2683" class="code-runner ember-view code-quiz__run-panel">
             <textarea id="id_coderunner_input"></textarea>
+            <!-- вывод запуска: скрипт показывает его прямо в ленте -->
+            <div class="code-runner__output">2</div>
           </div>
         </div>
       </div>
@@ -1320,7 +1331,8 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       /* ...но отправка на проверку остаётся за человеком */
       check('«Отправить на проверку» НЕ нажата', st.submitted === 0, 'кликов: ' + st.submitted);
       check('в ленте сказано про вставку и запуск',
-        /вставил решение/.test(aiFeedText(win, st)) && /Запустить код/.test(aiFeedText(win, st)),
+        /перенёс решение в редактор/.test(aiFeedText(win, st)) &&
+        /Запускаю код/.test(aiFeedText(win, st)),
         aiFeedText(win, st).slice(0, 120));
       /* Решение намеренно уезжает в общее хранилище: иначе кнопка «вставить»
          ищет его в answers/ и отвечает «в хранилище нет ответа». */
@@ -2331,7 +2343,7 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       check('огрызок не попал в редактор', st.setValue === null, JSON.stringify(st.setValue));
       check('код не запускался', st.ran === 0, 'кликов: ' + st.ran);
       check('в ленте объяснено, почему не вставили',
-        /вставлять нечего/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 120));
+        /неполным/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 140));
     }
   });
 
@@ -2604,6 +2616,160 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       check('решение просят короткое', /Решени[ея] — короткое/.test(body), 'нет правила');
       check('в пользовательском тексте тоже есть напоминание',
         /без import/.test(body), 'нет напоминания');
+    }
+  });
+
+  /* --- 62. лента выглядит как чат, а не как лог --------------------------- */
+  console.log('\n=== 62. служебные сообщения читаются как реплики бота ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+
+      const log = win.document.querySelector('#sgx-ai-log');
+      const rows = Array.from(log.querySelectorAll('.sgx-ai-row'));
+      check('все сообщения — строки чата', rows.length >= 3, 'строк: ' + rows.length);
+      check('у каждой строки есть аватар помощника',
+        rows.length > 0 && rows.every((r) => r.querySelector(':scope > .sgx-ai-ava svg')),
+        'аватара нет');
+      check('в аватаре значок искры',
+        !!(log.querySelector('.sgx-ai-ava svg')), 'значка нет');
+
+      const sys = Array.from(log.querySelectorAll('.sgx-ai-msg.sys')).map((e) => e.textContent);
+      check('служебные реплики есть', sys.length >= 2, 'реплик: ' + sys.length);
+      check('каждая начинается с большой буквы',
+        sys.every((t) => /^[А-ЯЁA-Z]/.test(t.trim())), sys.join(' | ').slice(0, 120));
+      check('нет реплик со строчной буквы вроде «вставил»',
+        !sys.some((t) => /^(вставил|нажал|пробую|модель)/.test(t.trim())),
+        sys.join(' | ').slice(0, 120));
+
+      /* размер: служебная реплика не должна быть мелочью */
+      const css = st.css || '';
+      const i = css.indexOf('#sgx-ai-panel .sgx-ai-msg.sys{');
+      const rule = i < 0 ? '' : css.slice(i, css.indexOf('}', i) + 1);
+      check('служебная реплика того же размера, что обычный текст',
+        /font-size:var\(--sgx-f-sm\)/.test(rule) && !/--sgx-f-xs/.test(rule), rule);
+      check('служебная реплика не серой мелочью',
+        /color:#4B4A47/.test(rule), rule);
+      check('в CSS есть строки чата и аватар',
+        /\.sgx-ai-row\{/.test(css) && /\.sgx-ai-ava\{/.test(css), 'правил нет');
+    }
+  });
+
+  /* --- 63. логотипы моделей из картинок ----------------------------------- */
+  console.log('\n=== 63. у моделей картинки-логотипы, а не значки ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 8000, cmMode: 'text/x-python',
+    aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+
+      const rows = Array.from(win.document.querySelectorAll('#sgx-ai-models li[data-model]'));
+      const imgs = rows.map((li) => li.querySelector('img.sgx-ai-mimg'));
+      check('в каждой строке картинка', imgs.every(Boolean), 'где-то нет картинки');
+      const srcs = imgs.map((i) => (i ? i.getAttribute('src') : ''));
+      check('GLM — своя картинка',
+        srcs[0] === 'https://i.imgur.com/DVdAOHf.png', srcs[0] || '—');
+      check('DeepSeek — своя картинка',
+        srcs[1] === 'https://i.imgur.com/qpf5Hoe.png', srcs[1] || '—');
+      check('Kimi — своя картинка',
+        srcs[2] === 'https://i.imgur.com/y2H82HX.png', srcs[2] || '—');
+      check('у картинок есть размер',
+        imgs.every((i) => Number(i.getAttribute('width')) >= 20),
+        imgs.map((i) => i.getAttribute('width')).join(','));
+      check('у картинок есть запасной значок на случай отказа',
+        imgs.every((i) => !!i.getAttribute('data-fallback')),
+        imgs.map((i) => i.getAttribute('data-fallback')).join(','));
+      check('в кнопке выбранной модели тоже картинка',
+        !!win.document.querySelector('#sgx-ai-micon img.sgx-ai-mimg'),
+        'картинки нет');
+    }
+  });
+
+  console.log('\n=== 63a. без картинки остаётся запасной значок, а не дырка ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['AI_MODELS', 'modelIcon'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    const noImg = { id: 'x', label: 'X', icon: 'bolt', smarts: 1, maxTokens: 100, img: '' };
+    const html = probe.modelIcon(noImg, 24);
+    const real = probe.AI_MODELS.filter((m) => m.img).length;
+    probe.close();
+    check('модель без картинки рисуется значком', /<svg/.test(html), html.slice(0, 60));
+    check('у всех четырёх моделей картинки заданы', real === 4, 'с картинкой: ' + real);
+  }
+
+  /* --- 64. вывод запуска показывается прямо в ленте ----------------------- */
+  console.log('\n=== 64. результат запуска виден в самом блоке ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 10000, cmMode: 'text/x-python',
+    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 5000));
+
+      const out = win.document.querySelector('#sgx-ai-log .sgx-ai-runout');
+      check('вывод запуска показан в ленте', !!out, 'блока вывода нет');
+      check('у вывода есть подпись',
+        !!out && /Вывод запуска/.test(out.querySelector('.sgx-ai-runhead').textContent),
+        out ? out.querySelector('.sgx-ai-runhead').textContent : '—');
+      check('в выводе тот же текст, что на странице',
+        !!out && out.querySelector('.sgx-ai-runbody').textContent.trim() === '2',
+        out ? JSON.stringify(out.querySelector('.sgx-ai-runbody').textContent) : '—');
+      check('вывод показан как код',
+        !!(st.css || '').match(/\.sgx-ai-runbody\{[^}]*monospace/), 'не моноширинный');
+      check('больше не отправляем человека искать результат глазами',
+        !/результат ниже/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 120));
+      check('в ленте сказано, что код запускается',
+        /Запускаю код/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 120));
+    }
+  });
+
+  console.log('\n=== 64a. вывод с ошибкой выделяется красным ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['aiLogOutput', 'ensureAiRoot', 'aiSlot', 'looksLikeRunError'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    probe.ensureAiRoot();
+    probe.aiSlot();
+    const bad = 'Traceback (most recent call last):\nValueError: could not convert string to float';
+    const good = 'True';
+    const isBad = probe.looksLikeRunError(bad);
+    const isGood = probe.looksLikeRunError(good);
+    probe.aiLogOutput(bad);
+    const badBlock = probe.window.document.querySelector('#sgx-ai-log .sgx-ai-runout');
+    const badClass = badBlock ? badBlock.className : '';
+    const headText = badBlock ? badBlock.querySelector('.sgx-ai-runhead').textContent : '';
+    probe.close();
+    check('ошибка распознана', isBad, 'не распознана');
+    check('обычный вывод ошибкой не считается', !isGood, 'ложное срабатывание');
+    check('блок с ошибкой помечен красным', /\bbad\b/.test(badClass), badClass);
+    check('в подписи сказано про ошибку', /ошибк/i.test(headText), headText);
+  }
+
+  /* --- 65. стрелка переноса летит от ИИ к редактору ----------------------- */
+  console.log('\n=== 65. при вставке решения летит стрелка к редактору ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 10000, cmMode: 'text/x-python',
+    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3000));
+      /* стрелка живёт около секунды и сама убирается — значит проверяем, что она
+         вообще создавалась и что её уносит за собой */
+      check('стрелка переноса создавалась', st.flew > 0, 'пролётов: ' + st.flew);
+      check('после переноса стрелка убрана',
+        !win.document.querySelector('.sgx-ai-fly'), 'осталась на экране');
+      check('правило анимации есть в стилях',
+        /\.sgx-ai-fly\{/.test(st.css || '') && /transition:transform/.test(st.css || ''),
+        'правила нет');
+      check('код всё равно доехал до редактора',
+        /n % 2 == 0/.test(st.setValue || ''), JSON.stringify((st.setValue || '').slice(0, 60)));
     }
   });
 

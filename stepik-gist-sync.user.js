@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.7.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам вставляет в редактор и нажимает «Запустить код» (отправку на проверку — никогда). Модель выбирается списком со значком и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
+// @version      6.8.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам вставляет в редактор (со стрелкой переноса), нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: аватар помощника и живые реплики вместо серых строк лога. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
@@ -64,7 +64,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.7.0';
+  var VERSION = '6.8.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -941,8 +941,27 @@
        при каждом ответе — только прокрутка.                                   */
     '#sgx-ai-panel .sgx-ai-log{height:440px;max-height:60vh;overflow:auto;',
     'padding:var(--sgx-s3) var(--sgx-s4);display:flex;flex-direction:column;gap:var(--sgx-s3);background:#fff}',
+    /* Строка чата: аватар помощника слева, сообщение справа. Так служебные
+       сообщения читаются как реплики бота, а не как лог скрипта.               */
+    '#sgx-ai-panel .sgx-ai-row{display:flex;align-items:flex-start;gap:var(--sgx-s2)}',
+    '#sgx-ai-panel .sgx-ai-row > *:not(.sgx-ai-ava){flex:1 1 auto;min-width:0}',
+    '#sgx-ai-panel .sgx-ai-ava{display:flex;align-items:center;justify-content:center;',
+    'width:28px;height:28px;flex:0 0 auto;border-radius:50%;background:#EAF1FB;color:#3B7DD8}',
     '#sgx-ai-panel .sgx-ai-msg{font-size:var(--sgx-f);line-height:1.6;color:var(--sgx-fg)}',
-    '#sgx-ai-panel .sgx-ai-msg.sys{color:var(--sgx-fg-dim);font-size:var(--sgx-f-xs)}',
+    /* служебная реплика — не мелочь серым: обычный размер и читаемый цвет */
+    '#sgx-ai-panel .sgx-ai-msg.sys{color:#4B4A47;font-size:var(--sgx-f-sm);padding-top:3px}',
+    /* логотипы моделей: картинка чёрным по белому, поэтому плитка со скруглением */
+    '#sgx-ai-panel .sgx-ai-mimg{flex:0 0 auto;border-radius:var(--sgx-r-sm);object-fit:contain;',
+    'background:#fff;border:1px solid #ECECEA;padding:1px}',
+    /* вывод запуска кода — прямо в ленте, под кодом */
+    '#sgx-ai-panel .sgx-ai-runout{border:1px solid #DCE7D9;background:#F4F9F3;border-radius:var(--sgx-r-sm);overflow:hidden}',
+    '#sgx-ai-panel .sgx-ai-runout.bad{border-color:#F0C9C3;background:#FDF2F0}',
+    '#sgx-ai-panel .sgx-ai-runhead{padding:var(--sgx-s1) var(--sgx-s3);font-size:12px;font-weight:600;',
+    'color:#3F6B4A;border-bottom:1px solid #DCE7D9}',
+    '#sgx-ai-panel .sgx-ai-runout.bad .sgx-ai-runhead{color:#8C2F22;border-bottom-color:#F0C9C3}',
+    '#sgx-ai-panel .sgx-ai-runbody{padding:var(--sgx-s2) var(--sgx-s3);color:#1F1D1B;',
+    'font:var(--sgx-mono)/1.6 ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,Menlo,monospace;',
+    'white-space:pre-wrap;overflow-wrap:anywhere}',
     /* код и кнопка копирования: кнопка живёт ВНУТРИ области кода, в её правом
        верхнем углу, — там, где человек и ищет копирование, а не в шапке блока */
     '#sgx-ai-panel .sgx-ai-codewrap{position:relative}',
@@ -972,6 +991,12 @@
     '#sgx-ai-panel .sgx-ai-dots span:nth-child(2){animation-delay:.2s}',
     '#sgx-ai-panel .sgx-ai-dots span:nth-child(3){animation-delay:.4s}',
     '@keyframes sgx-blink{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:1;transform:translateY(-2px)}}',
+    /* стрелка переноса решения: летит от блока ИИ к редактору. Живёт прямо в body
+       и позиционируется по экрану, потому что путь идёт между двумя разными
+       контейнерами страницы.                                                   */
+    '.sgx-ai-fly{position:fixed;z-index:2147483646;pointer-events:none;opacity:0;color:#3B7DD8;',
+    'transition:transform .62s cubic-bezier(.35,0,.25,1),opacity .18s ease;',
+    'filter:drop-shadow(0 2px 6px rgba(59,125,216,.35))}',
     /* тонкая полоска сверху страницы — как встроенный индикатор сайта */
     '#sgx-progress{position:fixed;top:0;left:0;right:0;height:3px;z-index:2147483600;pointer-events:none}',
     '#sgx-progress>div{height:100%;width:0;background:#4CAF50;opacity:.85;transition:width .35s ease}',
@@ -1091,6 +1116,114 @@
       var ctx = stepContext();
       if (ctx) dismissed[ctx.key] = true;
     }
+  }
+
+  /* Вывод запуска кода. Раньше в ленте было «нажал «Запустить код» — результат
+     ниже», и человек шёл искать этот результат глазами по странице. Теперь вывод
+     показываем прямо в блоке, под кодом.
+
+     Селекторы перечислены по убыванию надёжности и все проверяются на принадлежность
+     карточке задания: показать вместо вывода условие задачи было бы хуже, чем не
+     показать ничего.                                                           */
+  var RUN_OUT_SELS = [
+    '.code-runner__output', '.code-editor-quiz__output', '.run-code-result',
+    '.attempt-wrapper__output', '.code-quiz__output', '.execution-result',
+    '.run-result', '.code-output', '.output-viewer', '.console-output'
+  ];
+
+  function runOutputText() {
+    var host = $('.attempt-wrapper__content') || $('.quiz-plugin') || document.body;
+    var i, node, text;
+    for (i = 0; i < RUN_OUT_SELS.length; i++) {
+      node = $(RUN_OUT_SELS[i]);
+      if (!node || (host.contains && !host.contains(node))) continue;
+      /* Порог именно «> 0»: ответ из одного символа («2») — законный вывод,
+         а не пустота. norm() уже срезал пробелы, так что пустой узел не пройдёт. */
+      text = norm(node.textContent || '');
+      if (text.length > 0 && text.length < 4000) return text;
+    }
+    /* запасной путь: ищем по имени класса, но только внутри блока с редактором
+       и никогда — в своём собственном блоке */
+    var scopes = [$('.quiz-plugin'), $('.code-editor-quiz__editor'), $('.attempt-wrapper__plugin')];
+    for (i = 0; i < scopes.length; i++) {
+      if (!scopes[i]) continue;
+      var found = scopes[i].querySelectorAll('[class*="output"]');
+      for (var j = 0; j < found.length; j++) {
+        if (found[j].closest && found[j].closest('#sgx-ai-root')) continue;
+        text = norm(found[j].textContent || '');
+        if (text.length > 0 && text.length < 4000) return text;
+      }
+    }
+    return '';
+  }
+
+  function looksLikeRunError(text) {
+    return /traceback|error|exception|ошибк|failed|wrong answer|неверн|time limit|превыш/i
+      .test(String(text || ''));
+  }
+
+  /* Показать вывод запуска в ленте. Ошибку красим красным, обычный вывод — как код. */
+  function aiLogOutput(text) {
+    var log = aiLogEl();
+    if (!log || !text) return null;
+    var bad = looksLikeRunError(text);
+    var wrap = document.createElement('div');
+    wrap.className = 'sgx-ai-msg sgx-ai-runout' + (bad ? ' bad' : '');
+    var head = document.createElement('div');
+    head.className = 'sgx-ai-runhead';
+    head.textContent = bad ? 'Вывод запуска — с ошибкой' : 'Вывод запуска';
+    var body = document.createElement('div');
+    body.className = 'sgx-ai-runbody';
+    body.textContent = text;
+    wrap.appendChild(head);
+    wrap.appendChild(body);
+    log.appendChild(aiRow(wrap));
+    log.scrollTop = log.scrollHeight;
+    return wrap;
+  }
+
+  /* Стрелка «переноса»: летит от блока ИИ к редактору в момент вставки. Это не
+     украшение ради украшения — раньше код просто появлялся в редакторе, и человек
+     не понимал, куда смотреть. Стрелка показывает, куда именно уехало решение.
+     Уважаем «уменьшить движение»: если человек его просил, анимацию не запускаем. */
+  function prefersStill() {
+    try {
+      return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    } catch (e) { return false; }
+  }
+
+  function flyArrow(from, to) {
+    if (!from || !to || !from.getBoundingClientRect || !to.getBoundingClientRect) return;
+    if (prefersStill()) return;
+    var a = from.getBoundingClientRect();
+    var b = to.getBoundingClientRect();
+    if (!a.width || !a.height || !b.width || !b.height) return;
+
+    var x1 = a.left + a.width / 2;
+    var y1 = a.top + 26;
+    var x2 = b.left + b.width / 2;
+    var y2 = b.top + b.height / 2;
+
+    var el = document.createElement('div');
+    el.className = 'sgx-ai-fly';
+    el.innerHTML = icon('arrow', 30);
+    el.style.left = Math.round(x1) + 'px';
+    el.style.top = Math.round(y1) + 'px';
+    document.body.appendChild(el);
+
+    /* Стартовое положение фиксируем в следующем кадре: без этого браузер склеит
+       начало и конец перехода и стрелка просто появится на месте.
+       requestAnimationFrame берём, только если он есть: в песочнице тестов его
+       нет, и падать из-за анимации скрипт не должен.                          */
+    var nextFrame = (typeof requestAnimationFrame === 'function')
+      ? requestAnimationFrame
+      : function (fn) { setTimeout(fn, 20); };
+    nextFrame(function () {
+      el.style.transform = 'translate(' + Math.round(x2 - x1) + 'px,' + Math.round(y2 - y1) + 'px)';
+      el.style.opacity = '1';
+    });
+    setTimeout(function () { el.style.opacity = '0'; }, 620);
+    setTimeout(function () { el.remove(); }, 900);
   }
 
   function flash(el) {
@@ -1226,6 +1359,9 @@ var ICONS = {
       '<path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
     gem: '<path d="M6 3h12l4 6-10 12L2 9z"/><path d="M2 9h20M9 3l3 18M15 3l-3 18"/>',
     chev: '<polyline points="6 9 12 15 18 9"/>',
+    /* стрелка «переноса»: летит от блока ИИ к редактору, когда решение
+       вставляется — чтобы было видно, куда именно оно уехало */
+    arrow: '<line x1="4" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/>',
     sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>' +
       '<line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>' +
       '<line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>' +
@@ -1719,8 +1855,9 @@ async function jobCollect(ctx, target) {
   var AI_TIMEOUT = 90000;
 
   /* Каталог моделей канала. Список взят у самого сервиса (GET /v1/models), а не
-     придуман: у каждой записи — значок для списка, «ум» по пятибалльной шкале
-     (человек должен видеть, чем платит за ум: сильные модели думают дольше)
+     придуман: у каждой записи — СВОЯ картинка (человек прислал ссылки на логотипы),
+     запасной значок на случай, если картинка не загрузится, «ум» по пятибалльной
+     шкале (человек должен видеть, чем платит за ум: сильные модели думают дольше)
      и СВОЙ лимит ответа.
 
      Лимит — главное здесь. Reasoning-модель пишет размышления прямо в ответ, и
@@ -1730,21 +1867,51 @@ async function jobCollect(ctx, target) {
   var AI_MODELS = [
     {
       id: 'glm-5.3-flash', label: 'GLM 5.3 Flash', icon: 'bolt', smarts: 2,
-      maxTokens: 8000, note: 'быстрая, для простых заданий'
+      maxTokens: 8000, note: 'быстрая, для простых заданий',
+      img: 'https://i.imgur.com/DVdAOHf.png'
     },
     {
       id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', icon: 'chip', smarts: 3,
-      maxTokens: 20000, note: 'думает прямо в ответе — лимит выше'
+      maxTokens: 20000, note: 'думает прямо в ответе — лимит выше',
+      img: 'https://i.imgur.com/qpf5Hoe.png'
     },
     {
       id: 'kimi-k2.7-code', label: 'Kimi K2.7 Code', icon: 'code', smarts: 4,
-      maxTokens: 32000, note: 'заточена под код'
+      maxTokens: 32000, note: 'заточена под код',
+      img: 'https://i.imgur.com/y2H82HX.png'
     },
     {
       id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', icon: 'gem', smarts: 5,
-      maxTokens: 40000, note: 'самая сильная, отвечает дольше'
+      maxTokens: 40000, note: 'самая сильная, отвечает дольше',
+      img: 'https://i.imgur.com/qpf5Hoe.png'
     }
   ];
+
+  /* Логотип модели: картинка, а если она не загрузилась — запасной значок.
+     Без запасного варианта в списке осталась бы дырка.                          */
+  function modelIcon(m, size) {
+    var s = size || 20;
+    if (!m.img) return icon(m.icon, s);
+    return '<img class="sgx-ai-mimg" src="' + m.img + '" alt="" width="' + s + '" height="' + s +
+      '" data-fallback="' + escapeHtml(m.icon) + '">';
+  }
+
+  /* Подмену на запасной значок вешаем слушателем, а не строкой в onerror:
+     строку браузер вставил бы текстом, и в списке появился бы мусор.           */
+  function wireModelIcons(root) {
+    var imgs = (root || document).querySelectorAll('.sgx-ai-mimg');
+    Array.prototype.forEach.call(imgs, function (img) {
+      if (img.__sgxWired) return;
+      img.__sgxWired = true;
+      img.addEventListener('error', function () {
+        var box = document.createElement('span');
+        box.className = 'sgx-ic';
+        box.innerHTML = icon(img.getAttribute('data-fallback') || 'spark',
+          Number(img.getAttribute('width')) || 22);
+        if (img.parentNode) img.parentNode.replaceChild(box, img);
+      });
+    });
+  }
 
   function modelInfo(id) {
     for (var i = 0; i < AI_MODELS.length; i++) {
@@ -2137,24 +2304,6 @@ async function jobCollect(ctx, target) {
     return false;
   }
 
-  /* Человеку показываем «Python 3.6», а не «text/x-python»: в панели рядом со
-     решением стоит метка языка, и MIME-строка там читается как мусор.            */
-  function langLabel(lang) {
-    var raw = String(lang || '');
-    var m = raw.toLowerCase();
-    var names = [
-      [/c#|csharp/, 'C#'], [/c\+\+/, 'C++'], [/python/, 'Python'], [/\bjava\b/, 'Java'],
-      [/javascript/, 'JavaScript'], [/typescript/, 'TypeScript'], [/\bsql\b/, 'SQL'],
-      [/kotlin/, 'Kotlin'], [/\bgo\b|golang/, 'Go'], [/haskell/, 'Haskell'],
-      [/pascal/, 'Pascal'], [/rust/, 'Rust'], [/ruby/, 'Ruby'], [/php/, 'PHP'],
-      [/swift/, 'Swift'], [/scala/, 'Scala'], [/^\s*r\s*$/, 'R'], [/bash|shell/, 'Shell']
-    ];
-    for (var i = 0; i < names.length; i++) {
-      if (names[i][0].test(m)) return names[i][1];
-    }
-    return raw.replace(/^[a-z]+\/x?-?/, '').replace(/src$/, '') || 'код';
-  }
-
   function stepLanguage() {
     var cm = $('.CodeMirror');
     if (cm && cm.CodeMirror && cm.CodeMirror.getOption) {
@@ -2447,7 +2596,9 @@ async function jobCollect(ctx, target) {
     aiShow(true);
     if (!fixed) {
       aiLogClear();
-      aiLogAdd('шаг ' + ctx.step + ' · ' + langLabel(stepLanguage()), 'sys');
+      /* Живая реплика вместо «шаг 8 · Python»: язык и так виден в интерфейсе
+         Stepik, а человеку нужен понятный ход разговора.                       */
+      aiLogAdd('Шаг ' + ctx.step + '. Берусь за задание.', 'sys');
     }
     /* В индикаторе — короткая строка о том, чем ИИ занят СЕЙЧАС. Общие
        «думает…» ничего не говорят: человек должен видеть, что происходит
@@ -2520,14 +2671,14 @@ async function jobCollect(ctx, target) {
     if (!err) return { skipped: 'ошибку проверки не нашли' };
 
     if (!aiChannels().length) {
-      aiLogAdd('ИИ: ошибку вижу, но ключа нет — впиши его в «🔑 Настройки ИИ»', 'err');
+      aiLogAdd('Ошибку вижу, а ключа нет. Впиши его в «🔑 Настройки ИИ» — и я исправлю.', 'err');
       return { skipped: 'нет ключа' };
     }
 
     aiFixTried[ctx.key] = (aiFixTried[ctx.key] || 0) + 1;
     var prev = aiAnswer.text;
     aiLogReport(err);
-    aiLogAdd('пробую исправить сам…', 'sys');
+    aiLogAdd('Проверка не прошла. Смотрю, что не так, и исправляю.', 'sys');
 
     var fixCtx = Object.assign({}, ctx);
     try { fixCtx.prevCode = await lastSubmissionCode(); } catch (e) { fixCtx.prevCode = prev; }
@@ -2537,7 +2688,7 @@ async function jobCollect(ctx, target) {
     try {
       got = await aiCall(aiSystem(), aiUserFor(fixCtx), { retry: false });
     } catch (e) {
-      aiLogAdd('ИИ не смог исправить — ' + e.message, 'err');
+      aiLogAdd('Исправить не получилось: ' + e.message, 'err');
       return { skipped: 'ошибка канала: ' + e.message };
     }
 
@@ -2649,13 +2800,13 @@ async function jobCollect(ctx, target) {
   async function autoApply(ctx) {
     if (!aiAnswer || aiAnswer.key !== ctx.key || !aiAnswer.text) return { skipped: 'нет ответа' };
     if (aiAnswer.truncated) {
-      aiLogAdd('вставлять нечего: ответ неполный', 'sys');
+      aiLogAdd('Ответ получился неполным — вставлять нечего. Нажми «Спросить ИИ» ещё раз или выбери другую модель.', 'sys');
       return { skipped: 'ответ обрезан' };
     }
     /* В редактор тоже не подставляем стену размышлений: от неё код не заработает,
        а человек потеряет то, что писал.                                        */
     if (looksLikeReasoning(aiAnswer.text)) {
-      aiLogAdd('вставлять нечего: в ответе размышления, а не решение — смени модель', 'sys');
+      aiLogAdd('В ответе одни размышления, а не решение. Смени модель и попробуй снова.', 'sys');
       return { skipped: 'размышления вместо ответа' };
     }
 
@@ -2666,11 +2817,16 @@ async function jobCollect(ctx, target) {
     /* карточка задания дорисовывается не сразу — даём ей шанс появиться */
     if (!insertTarget()) await waitFor(insertTarget, 6000, 250);
     if (!insertTarget()) {
-      aiLogAdd('вставить некуда: на шаге нет ни редактора, ни вариантов', 'sys');
+      aiLogAdd('Здесь некуда вставлять: на шаге нет ни редактора, ни вариантов.', 'sys');
       return { skipped: 'нет места для вставки' };
     }
 
     var kind = aiAnswer.kind === 'choice' ? 'choice' : 'code';
+    /* Стрелку запускаем ДО вставки: пока она летит, код уже появляется в
+       редакторе — человек видит и путь, и результат.                           */
+    var target = insertTarget();
+    flyArrow(aiRootEl(), target && target.anchor);
+
     var res;
     if (kind === 'choice') {
       var picked = choiceFromText(aiAnswer.text);
@@ -2679,11 +2835,10 @@ async function jobCollect(ctx, target) {
       res = await writeCode(aiAnswer.text);
     }
     if (!res || !res.ok) {
-      aiLogAdd('вставить не получилось: ' + ((res && res.error) || 'неизвестная причина'), 'sys');
+      aiLogAdd('Вставить не получилось: ' + ((res && res.error) || 'неизвестная причина') + '.', 'sys');
       return { skipped: (res && res.error) || 'ошибка вставки' };
     }
-    aiLogAdd('вставил решение в редактор', 'sys');
-    var target = insertTarget();
+    aiLogAdd('Готово — перенёс решение в редактор.', 'sys');
     if (target) flash(target.anchor);
 
     /* Кнопка запуска появляется вместе с редактором, поэтому ждём её, а не
@@ -2697,11 +2852,16 @@ async function jobCollect(ctx, target) {
       btn = await waitFor(runButton, 4000, 250);
     }
     if (!btn) {
-      aiLogAdd('кнопку «Запустить код» не нашёл — запусти сам', 'sys');
+      aiLogAdd('Кнопку «Запустить код» не нашёл — запусти сам, пожалуйста.', 'sys');
       return { inserted: true, ran: false };
     }
     try { btn.click(); } catch (e) { /* ignore */ }
-    aiLogAdd('нажал «Запустить код» — результат ниже', 'sys');
+    aiLogAdd('Запускаю код, чтобы проверить.', 'sys');
+    /* Вывод показываем прямо здесь, а не отправляем человека искать его
+       глазами по странице. Если панель запуска ещё не отрисовалась — ждём.     */
+    var out = await waitFor(runOutputText, 6000, 400);
+    if (out) aiLogOutput(out);
+    else aiLogAdd('Вывод запуска не увидел — посмотри сам в панели запуска.', 'sys');
     return { inserted: true, ran: true };
   }
 
@@ -2768,6 +2928,21 @@ async function jobCollect(ctx, target) {
 
   function aiLogEl() { return document.getElementById('sgx-ai-log'); }
 
+  /* Строка чата: слева аватар помощника, справа сообщение. Раньше служебные
+     строки были просто серым мелким текстом с маленькой буквы («вставил решение
+     в редактор») — читалось как лог скрипта, а не как разговор. Человек просил
+     «более общительнее, как чат бот прям» — отсюда и аватар, и живые фразы.     */
+  function aiRow(content) {
+    var row = document.createElement('div');
+    row.className = 'sgx-ai-row';
+    var ava = document.createElement('span');
+    ava.className = 'sgx-ai-ava';
+    ava.innerHTML = icon('spark', 16);
+    row.appendChild(ava);
+    row.appendChild(content);
+    return row;
+  }
+
   /* Блок ИИ живёт в карточке задания, а не в боковом меню. Спросить ИИ можно и из
      меню Tampermonkey — тогда блока ещё нет, и все записи в ленту молча уходили
      в никуда: человек открывал и видел пустоту. Поэтому сначала создаём блок и
@@ -2815,6 +2990,7 @@ async function jobCollect(ctx, target) {
     el.className = 'sgx-ai-msg' + (kind ? ' ' + kind : '') + (monospace ? ' sgx-ai-code' : '');
     el.textContent = text;
 
+    var node = el;
     if (monospace) {
       var wrap = document.createElement('div');
       wrap.className = 'sgx-ai-codewrap';
@@ -2830,12 +3006,10 @@ async function jobCollect(ctx, target) {
       });
       wrap.appendChild(btn);
       wrap.appendChild(el);
-      log.appendChild(wrap);
-      log.scrollTop = log.scrollHeight;
-      return el;
+      node = wrap;
     }
 
-    log.appendChild(el);
+    log.appendChild(aiRow(node));
     log.scrollTop = log.scrollHeight;
     return el;
   }
@@ -2883,7 +3057,7 @@ async function jobCollect(ctx, target) {
       });
     }
 
-    log.appendChild(wrap);
+    log.appendChild(aiRow(wrap));
     log.scrollTop = log.scrollHeight;
     return wrap;
   }
@@ -2896,22 +3070,24 @@ async function jobCollect(ctx, target) {
     if (!log) return null;
     var el = document.createElement('div');
     el.className = 'sgx-ai-think';
-    el.innerHTML = '<span>' + escapeHtml(label || 'ИИ думает') + '</span>' +
+    el.innerHTML = '<span>' + escapeHtml(label || 'Думаю…') + '</span>' +
       '<span class="sgx-ai-dots"><span></span><span></span><span></span></span>' +
       '<span class="sgx-ai-secs">0 с</span>';
-    log.appendChild(el);
+    /* возвращаем СТРОКУ чата, а не её содержимое: гасить и удалять надо её */
+    var row = aiRow(el);
+    log.appendChild(row);
     log.scrollTop = log.scrollHeight;
 
     var started = Date.now();
     var secs = el.querySelector('.sgx-ai-secs');
-    el.__sgxTimer = setInterval(function () {
-      if (!el.parentNode) { clearInterval(el.__sgxTimer); return; }
+    row.__sgxTimer = setInterval(function () {
+      if (!row.parentNode) { clearInterval(row.__sgxTimer); return; }
       var s = Math.round((Date.now() - started) / 1000);
       if (secs) secs.textContent = s + ' с';
       /* если ответ идёт долго — прямо говорим, что ждём сервис, а не «висим» */
       if (s === 20 && secs) secs.textContent = s + ' с — сервис отвечает медленно';
     }, 1000);
-    return el;
+    return row;
   }
 
   /* Убрать индикатор «думает»: держать его рядом с готовым ответом нельзя —
@@ -2955,8 +3131,7 @@ async function jobCollect(ctx, target) {
     if (!aiAnswer || !aiAnswer.text) return;
     aiLogAdd(aiAnswer.text, '', true);
     if (aiAnswer.truncated) {
-      aiLogAdd('⚠ ответ неполный — оборвался по лимиту. Это не решение целиком:\n' +
-        'нажми «Спросить ИИ» ещё раз или выбери другую модель.', 'err');
+      aiLogAdd('Ответ оборвался по лимиту — это не решение целиком. Нажми «Спросить ИИ» ещё раз или выбери другую модель.', 'err');
     }
   }
 
@@ -3360,7 +3535,7 @@ async function jobCollect(ctx, target) {
     toast('Модель ИИ: ' + info.label);
     var ctx = stepContext();
     if (ctx && aiAnswer && aiAnswer.key === ctx.key) {
-      aiLogAdd('модель переключена на ' + info.label + ' — нажми «Спросить ИИ» заново', 'sys');
+      aiLogAdd('Переключился на ' + info.label + '. Нажми «Спросить ИИ», и я решу заново.', 'sys');
     }
     aiFillModels(aiRootEl());
   }
@@ -3377,7 +3552,7 @@ async function jobCollect(ctx, target) {
     var info = modelInfo(want);
 
     if (label) label.textContent = info.label;
-    if (micon) micon.innerHTML = icon(info.icon, 18);
+    if (micon) micon.innerHTML = modelIcon(info, 22);
 
     var have = Array.prototype.map.call(box.children, function (li) {
       return li.getAttribute('data-model');
@@ -3389,7 +3564,7 @@ async function jobCollect(ctx, target) {
         li.setAttribute('data-model', m.id);
         var dots = '';
         for (var i = 0; i < 5; i++) dots += '<i class="' + (i < m.smarts ? 'on' : '') + '"></i>';
-        li.innerHTML = icon(m.icon, 20) +
+        li.innerHTML = modelIcon(m, 26) +
           '<span class="sgx-ai-mname"><b>' + escapeHtml(m.label) + '</b>' +
           '<span>' + escapeHtml(m.note) + '</span></span>' +
           '<span class="sgx-ai-smart" title="ум ' + m.smarts + ' из 5">' + dots + '</span>';
@@ -3399,6 +3574,7 @@ async function jobCollect(ctx, target) {
     Array.prototype.forEach.call(box.children, function (li) {
       li.classList.toggle('on', li.getAttribute('data-model') === want);
     });
+    wireModelIcons(root || document);
     return box;
   }
 
@@ -3911,7 +4087,7 @@ async function jobCollect(ctx, target) {
       openPanel(true, true);
       aiShow(true);
       aiLogClear();
-      aiLogAdd('шаг ' + (aiAnswer.key || stepContext().key || ''), 'sys');
+      aiLogAdd('Шаг ' + (aiAnswer.key || stepContext().key || '') + '. Вот что я решил.', 'sys');
       aiLogAnswer();
       renderPanel(true);
     });
