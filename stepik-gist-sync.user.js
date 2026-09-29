@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.4.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Если тесты не прошли — ИИ прочитает ошибку и попробует исправить сам.
+// @version      6.5.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам вставляет в редактор и нажимает «Запустить код» (отправку на проверку — никогда). Обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Если тесты не прошли — ИИ прочитает ошибку и попробует исправить сам.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
@@ -31,12 +31,16 @@
  *    ( есть решение · вставить / нет ).
  *  • Где решения ещё нет, его подсказывает ИИ. Ответ появляется прямо в карточке
  *    задания — там же, где редактор кода, светлым блоком в стиле соседних панелей
- *    Stepik, с крупным шрифтом. Из ответа снимаются ```-обёртки и метка языка,
- *    поэтому он копируется одним нажатием. Модель знает, что уже проходили в уроке
- *    (текст лекции запоминается, пока её читают), держится этого уровня и сама
- *    сверяет вывод с тестовыми данными перед ответом. Модель можно переключить
- *    прямо в блоке. Ответ, оборвавшийся по лимиту токенов, помечается как
- *    неполный и в общее хранилище не попадает.
+ *    Stepik и на одной шкале размеров. Из ответа снимаются ```-обёртки и метка
+ *    языка, поэтому он копируется одним нажатием, а кнопка копирования стоит
+ *    внутри самого кода. Модель знает, что уже проходили в уроке (текст лекции
+ *    запоминается, пока её читают), держится этого уровня и сама сверяет вывод
+ *    с тестовыми данными перед ответом. Модель можно переключить прямо в блоке.
+ *    Готовое решение скрипт сам вставляет в редактор и нажимает «Запустить код»,
+ *    чтобы сразу был виден результат. «Отправить на проверку» он не нажимает
+ *    никогда — отправка остаётся за человеком. Ответ, оборвавшийся по лимиту
+ *    токенов, помечается как неполный, не вставляется и в общее хранилище
+ *    не попадает.
  *
  * ГДЕ ЛЕЖИТ
  *    Исходник и установка: https://github.com/NOTyeamu/Stepik-Fast-Complete
@@ -60,7 +64,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.4.0';
+  var VERSION = '6.5.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -810,30 +814,39 @@
     'font:14.5px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#37352F;cursor:pointer}',
     '#sgx-report button:hover{background:#F1F1EF}',
     /* --- панель живёт ВНУТРИ бокового меню курса и выглядит как его часть ---
-       Шрифты крупнее прежнего: на тёмном фоне мелкий текст расплывался.        */
-    '#sgx-panel{position:relative;display:none;width:100%;box-sizing:border-box;',
-    'font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#fff}',
+       Та же шкала, что и у блока ИИ: отступы 4/8/12/16, высота органов 32,
+       радиус 6/8, шрифты 13/14/15. Раньше у каждого блока были свои числа, и
+       рядом они выглядели как набор случайных размеров.                        */
+    '#sgx-panel{--sgx-s1:4px;--sgx-s2:8px;--sgx-s3:12px;--sgx-s4:16px;',
+    '--sgx-ctl:32px;--sgx-r:8px;--sgx-r-sm:6px;',
+    '--sgx-f-xs:13px;--sgx-f-sm:14px;--sgx-f:15px;',
+    'position:relative;display:none;width:100%;box-sizing:border-box;',
+    'font:var(--sgx-f)/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#fff}',
     '#sgx-panel.on{display:block}',
     '#sgx-panel *{box-sizing:border-box}',
-    '#sgx-panel .sgx-module{display:flex;align-items:center;gap:9px;padding:13px 16px;',
+    '#sgx-panel .sgx-module{display:flex;align-items:center;gap:var(--sgx-s2);',
+    'min-height:calc(var(--sgx-ctl) + var(--sgx-s3));padding:var(--sgx-s3) var(--sgx-s4);',
     'border-bottom:1px solid rgba(255,255,255,.08);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
     '#sgx-panel .sgx-badge{display:flex;align-items:center;justify-content:center;width:24px;height:24px;',
     'border-radius:50%;background:#4CAF50;color:#fff;font-size:12px;font-weight:700;flex:none}',
-    '#sgx-panel .sgx-modtitle{flex:1 1 auto;min-width:0;font-size:15.5px;font-weight:600;color:#fff}',
-    '#sgx-panel .sgx-close{display:flex;align-items:center;justify-content:center;width:28px;height:28px;',
-    'border:0;border-radius:6px;background:transparent;color:rgba(255,255,255,.65);cursor:pointer;padding:0;flex:none}',
+    '#sgx-panel .sgx-modtitle{flex:1 1 auto;min-width:0;font-size:var(--sgx-f);font-weight:600;color:#fff}',
+    '#sgx-panel .sgx-close{display:flex;align-items:center;justify-content:center;',
+    'width:var(--sgx-ctl);height:var(--sgx-ctl);border:0;border-radius:var(--sgx-r-sm);',
+    'background:transparent;color:rgba(255,255,255,.65);cursor:pointer;padding:0;flex:none}',
     '#sgx-panel .sgx-close:hover{background:rgba(255,255,255,.12);color:#fff}',
-    '#sgx-panel .sgx-row{display:flex;align-items:center;gap:9px;padding:11px 16px 4px}',
-    '#sgx-panel .sgx-row label{flex:0 0 auto;font-size:14px;color:rgba(255,255,255,.8)}',
-    '#sgx-panel select{flex:1 1 0;min-width:0;height:34px;padding:0 8px;border:1px solid rgba(255,255,255,.18);',
-    'border-radius:6px;background:rgba(255,255,255,.06);color:#fff;',
-    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:14px}',
+    '#sgx-panel .sgx-row{display:flex;align-items:center;gap:var(--sgx-s2);padding:var(--sgx-s3) var(--sgx-s4) var(--sgx-s1)}',
+    '#sgx-panel .sgx-row label{flex:0 0 auto;font-size:var(--sgx-f-sm);color:rgba(255,255,255,.8)}',
+    '#sgx-panel select{flex:1 1 0;min-width:0;height:var(--sgx-ctl);padding:0 var(--sgx-s2);',
+    'border:1px solid rgba(255,255,255,.18);border-radius:var(--sgx-r-sm);background:rgba(255,255,255,.06);color:#fff;',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:var(--sgx-f-sm)}',
     '#sgx-panel select option{background:#fff;color:#1F1D1B}',
     '#sgx-panel select:focus{outline:2px solid rgba(120,190,255,.5);outline-offset:1px}',
-    '#sgx-panel .sgx-note{padding:9px 16px 6px;font-size:13.5px;color:rgba(255,255,255,.55);line-height:1.45}',
-    '#sgx-panel .sgx-btn{display:flex;align-items:center;justify-content:center;gap:8px;',
-    'width:calc(100% - 32px);margin:0 16px 8px;height:38px;border:1px solid transparent;border-radius:6px;padding:0;',
-    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:14.5px;font-weight:500;cursor:pointer;',
+    '#sgx-panel .sgx-note{padding:var(--sgx-s2) var(--sgx-s4) var(--sgx-s1);font-size:var(--sgx-f-xs);',
+    'color:rgba(255,255,255,.55);line-height:1.45}',
+    '#sgx-panel .sgx-btn{display:flex;align-items:center;justify-content:center;gap:var(--sgx-s2);',
+    'width:calc(100% - var(--sgx-s4) * 2);margin:0 var(--sgx-s4) var(--sgx-s2);height:38px;',
+    'border:1px solid transparent;border-radius:var(--sgx-r-sm);padding:0;',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:var(--sgx-f-sm);font-weight:500;cursor:pointer;',
     'transition:background .15s ease,color .15s ease}',
     '#sgx-panel .sgx-btn.primary{background:#fff;color:#1F1D1B}',
     '#sgx-panel .sgx-btn.primary:hover{background:#EDEDED}',
@@ -848,57 +861,83 @@
     '#sgx-panel .sgx-ic{flex:0 0 auto}',
     '#sgx-panel .sgx-progress{height:3px;background:rgba(255,255,255,.12);margin:2px 0 0}',
     '#sgx-panel .sgx-bar{height:100%;width:0;background:#4CAF50;transition:width .35s ease}',
-    '#sgx-panel .sgx-status{padding:11px 16px 15px;font-size:14px;color:rgba(255,255,255,.72);min-height:38px;line-height:1.5}',
+    '#sgx-panel .sgx-status{padding:var(--sgx-s3) var(--sgx-s4) var(--sgx-s4);font-size:var(--sgx-f-sm);',
+    'color:rgba(255,255,255,.72);min-height:38px;line-height:1.5}',
     /* --- блок ИИ внутри панели: повторяет родной редактор кода Stepik --- */
     '#sgx-panel .sgx-ai[hidden]{display:none}',
     /* --- блок ИИ: живёт на месте редактора кода в карточке задания ---
        Оформлен как соседние панели Stepik («Тестовые данные», «Напишите
        программу»): светлая карточка, серая полоса-шапка, вкладка «Код» белым
-       на ней, крупный текст. Тёмное поле убрано: рядом с родным светлым
-       редактором оно выглядело чужеродно, а мелкий шрифт на тёмном —
-       нечитаемо. Размеры подогнаны под сайт: 15px основной, 14px моно.      */
-    '#sgx-ai-root{display:none;width:100%;box-sizing:border-box;margin:14px 0 0;',
-    'border:1px solid #E5E5E5;border-radius:8px;background:#fff;overflow:hidden;',
-    'font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#2C2C2B}',
+       на ней. Тёмное поле убрано: рядом с родным светлым редактором оно
+       выглядело чужеродно, а мелкий шрифт на тёмном — нечитаемо.
+
+       Размеры заданы ОДНОЙ шкалой (--sgx-s1…s4, --sgx-ctl, --sgx-r, --sgx-f*):
+       раньше каждый блок нёс свои числа, и получалось «что-то большое, что-то
+       меньше». Шаг шкалы — 4px, всё кратно ей: отступы 4/8/12/16, высота любого
+       органа управления 32, радиус 6 у органов и 8 у карточек, шрифты 13/14/15. */
+    '#sgx-ai-root{--sgx-s1:4px;--sgx-s2:8px;--sgx-s3:12px;--sgx-s4:16px;',
+    '--sgx-ctl:32px;--sgx-r:8px;--sgx-r-sm:6px;',
+    '--sgx-f-xs:13px;--sgx-f-sm:14px;--sgx-f:15px;--sgx-mono:14px;',
+    '--sgx-bd:#E5E5E5;--sgx-bg-head:#F4F4F4;--sgx-fg:#2C2C2B;--sgx-fg-dim:#8A8880;',
+    'display:none;width:100%;box-sizing:border-box;margin:var(--sgx-s4) 0 0;',
+    'border:1px solid var(--sgx-bd);border-radius:var(--sgx-r);background:#fff;overflow:hidden;',
+    'font:var(--sgx-f)/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--sgx-fg)}',
     '#sgx-ai-root.on{display:block}',
     '#sgx-ai-root *{box-sizing:border-box}',
+    /* шапка: вкладка слева, органы справа, всё по одной высоте и на одной линии */
     '#sgx-ai-panel .sgx-ai-head{display:flex;align-items:center;justify-content:space-between;',
-    'gap:10px;flex-wrap:wrap;padding:8px 12px;background:#F4F4F4;border-bottom:1px solid #E5E5E5}',
-    '#sgx-ai-panel .sgx-ai-tabs{display:flex;align-items:center;gap:8px;margin:0;padding:0;list-style:none}',
-    '#sgx-ai-panel .sgx-ai-tab{display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:6px;',
-    'font-size:15px;font-weight:600;color:#6B6A67;background:transparent;border:1px solid transparent}',
-    '#sgx-ai-panel .sgx-ai-tab.active{color:#1F1D1B;background:#fff;border-color:#E5E5E5}',
+    'gap:var(--sgx-s3);flex-wrap:wrap;min-height:calc(var(--sgx-ctl) + var(--sgx-s2) * 2);',
+    'padding:var(--sgx-s2) var(--sgx-s3);background:var(--sgx-bg-head);border-bottom:1px solid var(--sgx-bd)}',
+    '#sgx-ai-panel .sgx-ai-tabs{display:flex;align-items:center;gap:var(--sgx-s2);margin:0;padding:0;list-style:none}',
+    '#sgx-ai-panel .sgx-ai-tab{display:flex;align-items:center;gap:var(--sgx-s2);height:var(--sgx-ctl);',
+    'padding:0 var(--sgx-s3);border-radius:var(--sgx-r-sm);border:1px solid transparent;',
+    'font-size:var(--sgx-f);font-weight:600;color:#6B6A67;background:transparent}',
+    '#sgx-ai-panel .sgx-ai-tab.active{color:#1F1D1B;background:#fff;border-color:var(--sgx-bd)}',
     '#sgx-ai-panel .sgx-ic{flex:0 0 auto}',
-    '#sgx-ai-panel .sgx-ai-tools{display:flex;align-items:center;gap:6px}',
-    '#sgx-ai-panel .sgx-ai-tool{display:flex;align-items:center;justify-content:center;width:30px;height:30px;',
-    'padding:0;border:0;border-radius:6px;background:transparent;color:#6B6A67;cursor:pointer}',
+    '#sgx-ai-panel .sgx-ai-tools{display:flex;align-items:center;gap:var(--sgx-s2)}',
+    '#sgx-ai-panel .sgx-ai-tool{display:flex;align-items:center;justify-content:center;',
+    'width:var(--sgx-ctl);height:var(--sgx-ctl);padding:0;border:0;border-radius:var(--sgx-r-sm);',
+    'background:transparent;color:#6B6A67;cursor:pointer}',
     '#sgx-ai-panel .sgx-ai-tool:hover{background:#E6E6E6;color:#1F1D1B}',
-    '#sgx-ai-panel .sgx-ai-lang{padding:5px 10px;border-radius:6px;border:1px solid #E5E5E5;background:#fff;',
-    'font-size:13.5px;color:#5A5955;white-space:nowrap}',
+    '#sgx-ai-panel .sgx-ai-lang{display:flex;align-items:center;height:var(--sgx-ctl);',
+    'padding:0 var(--sgx-s3);border-radius:var(--sgx-r-sm);border:1px solid var(--sgx-bd);background:#fff;',
+    'font-size:var(--sgx-f-xs);color:#5A5955;white-space:nowrap}',
     '#sgx-ai-panel .sgx-ai-lang.busy{color:#8A6D1F;border-color:#E8D9A8;background:#FDF7E3}',
-    /* выбор модели: такой же селект, как «Python 3.6» у самого Stepik рядом */
-    '#sgx-ai-panel .sgx-ai-model{height:30px;max-width:200px;padding:0 8px;border:1px solid #E5E5E5;border-radius:6px;',
-    'background:#fff;color:#2C2C2B;font-family:inherit;font-size:13.5px;cursor:pointer}',
+    /* выбор модели: такой же орган управления, как «Python 3.6» у самого Stepik */
+    '#sgx-ai-panel .sgx-ai-model{height:var(--sgx-ctl);max-width:200px;padding:0 var(--sgx-s2);',
+    'border:1px solid var(--sgx-bd);border-radius:var(--sgx-r-sm);background:#fff;color:var(--sgx-fg);',
+    'font-family:inherit;font-size:var(--sgx-f-xs);cursor:pointer}',
     '#sgx-ai-panel .sgx-ai-model:hover{border-color:#C9C9C7}',
     '#sgx-ai-panel .sgx-ai-model:focus{outline:2px solid #9CC4F0;outline-offset:1px}',
     /* лента: только чтение, ничего не печатается руками. Светлая, как родной
        редактор кода, поэтому блок читается как его продолжение.              */
-    '#sgx-ai-panel .sgx-ai-log{max-height:46vh;overflow:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px;',
-    'background:#fff}',
-    '#sgx-ai-panel .sgx-ai-msg{font-size:15px;line-height:1.6;color:#2C2C2B}',
-    '#sgx-ai-panel .sgx-ai-msg.me{align-self:flex-start;padding:8px 12px;border-radius:8px;',
-    'background:#EDF6EE;color:#1F4D28;font-size:14px}',
-    '#sgx-ai-panel .sgx-ai-msg.sys{color:#8A8880;font-size:13.5px}',
-    '#sgx-ai-panel .sgx-ai-code{margin:0;padding:12px 14px;border-radius:8px;background:#F7F7F6;',
-    'border:1px solid #ECECEA;color:#1F1D1B;',
-    'font:14px/1.65 ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,Menlo,monospace;',
+    '#sgx-ai-panel .sgx-ai-log{max-height:46vh;overflow:auto;',
+    'padding:var(--sgx-s3) var(--sgx-s4);display:flex;flex-direction:column;gap:var(--sgx-s3);background:#fff}',
+    '#sgx-ai-panel .sgx-ai-msg{font-size:var(--sgx-f);line-height:1.6;color:var(--sgx-fg)}',
+    '#sgx-ai-panel .sgx-ai-msg.sys{color:var(--sgx-fg-dim);font-size:var(--sgx-f-xs)}',
+    /* код и кнопка копирования: кнопка живёт ВНУТРИ области кода, в её правом
+       верхнем углу, — там, где человек и ищет копирование, а не в шапке блока */
+    '#sgx-ai-panel .sgx-ai-codewrap{position:relative}',
+    '#sgx-ai-panel .sgx-ai-code{margin:0;padding:var(--sgx-s3) var(--sgx-s4);border-radius:var(--sgx-r-sm);',
+    'background:#F7F7F6;border:1px solid #ECECEA;color:#1F1D1B;',
+    'font:var(--sgx-mono)/1.65 ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,Menlo,monospace;',
     'white-space:pre-wrap;overflow-wrap:anywhere}',
-    '#sgx-ai-panel .sgx-ai-err{margin:0;padding:10px 12px;border-radius:8px;background:#FDECEA;',
+    '#sgx-ai-panel .sgx-ai-codecopy{position:absolute;top:var(--sgx-s2);right:var(--sgx-s2);',
+    'display:flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;',
+    'border:1px solid var(--sgx-bd);border-radius:var(--sgx-r-sm);background:#fff;color:#6B6A67;',
+    'cursor:pointer;opacity:0;transition:opacity .15s ease}',
+    '#sgx-ai-panel .sgx-ai-codewrap:hover .sgx-ai-codecopy,',
+    '#sgx-ai-panel .sgx-ai-codecopy:focus{opacity:1}',
+    '#sgx-ai-panel .sgx-ai-codecopy:hover{background:#F1F1EF;color:#1F1D1B}',
+    '#sgx-ai-panel .sgx-ai-codecopy.done{border-color:#B7DCC0;background:#EDF6EE;color:#2C6B3C}',
+    '#sgx-ai-panel .sgx-ai-err{margin:0;padding:var(--sgx-s3);border-radius:var(--sgx-r-sm);background:#FDECEA;',
     'border-left:4px solid #E05B4B;color:#8C2F22;',
-    'font:13.5px/1.6 ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,Menlo,monospace;',
+    'font:var(--sgx-f-xs)/1.6 ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,Menlo,monospace;',
     'white-space:pre-wrap;overflow-wrap:anywhere}',
-    /* «думает» — живой индикатор, чтобы было видно, что работа идёт */
-    '#sgx-ai-panel .sgx-ai-think{display:flex;align-items:center;gap:8px;font-size:14px;color:#8A8880}',
+    /* «думает» — живой индикатор со счётчиком секунд */
+    '#sgx-ai-panel .sgx-ai-think{display:flex;align-items:center;gap:var(--sgx-s2);',
+    'font-size:var(--sgx-f-sm);color:var(--sgx-fg-dim)}',
+    '#sgx-ai-panel .sgx-ai-secs{font-size:var(--sgx-f-xs);color:#B0AEA9;font-variant-numeric:tabular-nums}',
     '#sgx-ai-panel .sgx-ai-dots{display:inline-flex;gap:3px}',
     '#sgx-ai-panel .sgx-ai-dots span{width:6px;height:6px;border-radius:50%;background:currentColor;',
     'animation:sgx-blink 1.2s ease-in-out infinite}',
@@ -1332,8 +1371,32 @@ var ICONS = {
 
   /* Текст кнопки на Stepik — «Отправить на проверку», поэтому сверяем НАЧАЛО строки,
      а не всю строку целиком. «Решить снова» отсекаем: это перезапуск задания, а не отправка. */
-  var SUBMIT_RE = /^(отправить|отправка|проверить|решить|submit|send|check|run)/i;
-  var NOT_SUBMIT_RE = /снова|заново|ещё раз|еще раз|again|отмена|cancel|удалить|delete/i;
+  var SUBMIT_RE = /^(отправить|отправка|проверить|решить|submit|send|check)/i;
+  /* «Запустить код» — это отдельная кнопка, она НЕ отправляет ответ на проверку.
+     Её надо и находить отдельно, и ни в коем случае не путать с отправкой:
+     в английском интерфейсе «Run» попал бы под SUBMIT_RE, и обход заданий жал бы
+     «Запустить» вместо «Отправить». Поэтому run исключён из SUBMIT_RE и вынесен
+     в свой шаблон.                                                             */
+  var RUN_RE = /^(запустить код|запустить|выполнить код|выполнить|run code|run|play)$/i;
+  var NOT_SUBMIT_RE = /снова|заново|ещё раз|еще раз|again|отмена|cancel|удалить|delete|запустить|выполнить/i;
+
+  /* Кнопка запуска кода. Сначала по классу: Stepik сам подписывает её
+     attempt-wrapper-button_run, и это надёжнее подписи, которая локализуется.   */
+  function runButton() {
+    var byClass = $('.attempt-wrapper-button_run');
+    if (byClass && !byClass.disabled) return byClass;
+
+    var nodes = $$('button, [role="button"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var text = norm(nodes[i].textContent);
+      if (!text || !RUN_RE.test(text)) continue;
+      var r = nodes[i].getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      if (nodes[i].disabled) continue;
+      return nodes[i];
+    }
+    return byClass || null;      /* класс нашли, но кнопка серая — вернём её как есть */
+  }
 
   function submitButton(includeDisabled) {
     var nodes = $$('button, [role="button"]');
@@ -1342,6 +1405,8 @@ var ICONS = {
       var el = nodes[i];
       var text = norm(el.textContent);
       if (!text || NOT_SUBMIT_RE.test(text) || !SUBMIT_RE.test(text)) continue;
+      /* кнопка запуска — не отправка, даже если подпись подходит под шаблон */
+      if (el.classList && el.classList.contains('attempt-wrapper-button_run')) continue;
       var r = el.getBoundingClientRect();
       if (!r.width || !r.height) continue;
       if (el.disabled) { disabled = disabled || el; continue; }
@@ -1608,7 +1673,7 @@ async function jobCollect(ctx, target) {
      (text.pollinations.ai) убран: анонимный тариф отвечал 402 через раз.    */
 
   var AI_GAP = 1500;                   /* только чтобы не долбить сервис в цикле */
-  var AI_GAP_PAID = 1500;              /* то же самое для своего канала */
+  var AI_GAP_PAID = 800;               /* то же самое для своего канала */
   var AI_WAIT_MAX = 3;                 /* столько секунд паузы пережидаем внутри, а не пропускаем канал */
   var AI_TRIES = 2;                    /* попыток на канал */
   /* Сколько ждём ответ. Без этого «думал две минуты» ничем не заканчивалось:
@@ -1627,9 +1692,14 @@ async function jobCollect(ctx, target) {
         return {
           model: model,
           messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-          /* 4000 не хватало: на задании с теорией в запросе модель упиралась
-             в лимит и присылала «```python\ndef» — огрызок вместо решения.      */
-          max_tokens: 8000,
+          /* 4000 вместо 8000: щедрый лимит заставляет модель писать дольше, а для
+             решения хватает с запасом. Обрыв по лимиту теперь распознаётся
+             (finish_reason), поэтому слишком тесный потолок не страшен —
+             неполный ответ не показывается как готовый и не публикуется.       */
+          max_tokens: 4000,
+          /* Низкая температура: решение задачи, а не рассказ. Заодно заметно
+             меньше «рассуждений» в ответе, а значит и времени.                 */
+          temperature: 0.2,
           private: true
         };
       }
@@ -1863,7 +1933,10 @@ async function jobCollect(ctx, target) {
     var samples = stepSamplesText();
     var text = norm((cond + '\n' + samples).replace(
       /Отправить на проверку|Решить снова|Скачать|Показать ответ|Тестовые данные(?=\s*№)/g, ' '));
-    return text.slice(0, 2500);
+    /* Условие режем короче прежнего: длинный хвост задания только раздувает
+       запрос, а время ответа растёт вместе с ним. Условия Stepik укладываются
+       в этот размер целиком.                                                    */
+    return text.slice(0, 1800);
   }
 
   /* Модель любит заворачивать решение в разметку: ```python … ``` или
@@ -1984,23 +2057,15 @@ async function jobCollect(ctx, target) {
     return 'text';
   }
 
+  /* Системный текст держим коротким: он уходит в каждый запрос, и каждое лишнее
+     предложение здесь — это лишнее время ответа. Правила оставлены, вода убрана. */
   function aiSystem() {
-    return 'Ты помощник студента на платформе Stepik. Реши задание и верни ТОЛЬКО ' +
-      'готовый ответ: без пояснений, без markdown-разметки, без ``` и без строки ' +
-      'с названием языка. Если это код — дай код целиком, одним куском. ' +
-      'Тестируется через stdin → stdout, строки могут содержать кириллицу и пробелы.\n' +
-      '\n' +
-      'Правила, которые важнее краткости:\n' +
-      '1. Решай на том уровне, который уже пройден в уроке. Не используй конструкции, ' +
-      'которых в теории урока ещё не было (генераторы, классы, лямбды, модули, ' +
-      'регулярки и т. п.), даже если так короче. Решение должно выглядеть так, будто ' +
-      'его написал студент после этой лекции.\n' +
-      '2. Если урок помечен как вводный — пиши максимально просто и прямолинейно.\n' +
-      '3. Перед ответом мысленно прогони свой код на всех тестовых данных из условия ' +
-      'и сравни результат с ожидаемым. Если не сходится хотя бы на одном — переделай ' +
-      'код. Не присылай код, который сам же не смог проверить.\n' +
-      '4. Убедись, что формат вывода совпадает с ожидаемым ровно: те же пробелы, ' +
-      'регистр и переводы строк, что в «выходных данных».';
+    return 'Реши задание со Stepik. Верни ТОЛЬКО ответ: без пояснений, без markdown, ' +
+      'без ``` и без строки с названием языка. Код — целиком, одним куском. ' +
+      'Ввод и вывод через stdin → stdout; строки могут содержать кириллицу и пробелы.\n' +
+      '1. Держись уровня урока: не используй то, чего в его теории ещё не было.\n' +
+      '2. Прогони код по тестовым данным из условия и сверь вывод с ожидаемым.\n' +
+      '3. Формат вывода — ровно как в «выходных данных»: те же пробелы и переводы строк.';
   }
 
   /* Блок «где мы и что уже проходили» — общий и для первого ответа, и для правки:
@@ -2047,11 +2112,11 @@ async function jobCollect(ctx, target) {
       : '';
     var base = aiLessonBlock() + '\n' + ask + hint + '\n\nУсловие:\n' + task;
     if (ctx && ctx.prevCode) {
-      base += '\n\nТвой прошлый ответ:\n' + String(ctx.prevCode).slice(0, 1800);
+      base += '\n\nТвой прошлый ответ:\n' + String(ctx.prevCode).slice(0, 1200);
     }
     if (ctx && ctx.checkError) {
       base += '\n\nПроверка его отклонила. Отчёт проверяющей системы:\n' +
-        String(ctx.checkError).slice(0, 1400) +
+        String(ctx.checkError).slice(0, 1000) +
         '\n\nНайди причину и пришли исправленное решение целиком. ' +
         'Если ошибка из-за чтения ввода — учитывай, что данные приходят через stdin, ' +
         'а строки могут содержать кириллицу и пробелы.';
@@ -2062,14 +2127,11 @@ async function jobCollect(ctx, target) {
        модель уже знает, что именно сломалось.                                   */
     if (!ctx || !ctx.checkError) {
       if (hasSamples) {
-        base += '\n\nПрежде чем ответить, проверь себя:\n' +
-          '— возьми каждую строку из «Тестовые данные» и мысленно выполни свой код;\n' +
-          '— сравни полученный вывод с «выходом» посимвольно, включая пробелы;\n' +
-          '— если хотя бы один пример не сошёлся, исправь код и проверь снова;\n' +
-          '— в ответ отправь уже проверенный вариант, без комментариев о проверке.';
+        base += '\n\nПроверь себя на «Тестовых данных»: выполни код на каждой строке\n' +
+          'и сверь вывод с «выходом». Не сошлось — исправь. В ответ — только код.';
       } else {
-        base += '\n\nПрежде чем ответить, перечитай условие и убедись, что решение\n' +
-          'делает ровно то, что просят, и не использует непройденных конструкций.';
+        base += '\n\nПеречитай условие: решение должно делать ровно то, что просят,\n' +
+          'и не использовать непройденных конструкций.';
       }
     }
     return base;
@@ -2279,6 +2341,13 @@ async function jobCollect(ctx, target) {
       renderPanel(true);
       aiLogAnswer();
 
+      /* Вставляем решение сами и запускаем код, чтобы человек сразу увидел
+         результат. Отправку на проверку не трогаем — это его решение.
+         Вызываем ДО проверки на обрыв: autoApply сам объяснит в ленте, почему
+         неполный ответ никуда не вставляется. Тихо: неудача вставки не должна
+         ломать показ ответа.                                                    */
+      autoApply(ctx).catch(function (e) { log('автовставка не удалась: ' + (e && e.message)); });
+
       /* Ответ упёрся в лимит токенов. Раньше это выглядело как «модель написала
          одно слово»: в ленте оставался огрызок вроде «def», и он же уезжал
          в общее хранилище как готовое решение. Теперь лента помечает ответ
@@ -2293,7 +2362,7 @@ async function jobCollect(ctx, target) {
       /* Кладём решение в общее хранилище — иначе кнопка «вставить» ищет ответ в
          папке answers/, не находит и отвечает «в хранилище нет ответа». Заодно
          решение уезжает остальным. Тихо: неудача публикации не должна ломать показ. */
-      saveAiToStore(ctx).catch(function (e) { log('публикация решения ИИ не удалась: ' + e.message); });
+      saveAiToStore(ctx).catch(function (e) { log('публикация решения ИИ не удалась: ' + e.message) });
     } catch (e) {
       dropThink(thinking);
       aiMarkVerifying(false);
@@ -2364,6 +2433,9 @@ async function jobCollect(ctx, target) {
       return { skipped: 'ответ обрезан' };
     }
     setStatus('ИИ: решение исправлено — проверь и отправь снова');
+    /* Исправленный код тоже вставляем и запускаем: иначе человек вручную
+       переносит то, что скрипт и так держит в руках. Отправку не жмём.         */
+    autoApply(ctx).catch(function (e) { log('автовставка правки не удалась: ' + (e && e.message)); });
     saveAiToStore(ctx).catch(function (e) { log('публикация правки ИИ не удалась: ' + e.message); });
     return { fixed: true };
   }
@@ -2409,6 +2481,54 @@ async function jobCollect(ctx, target) {
     });
     if (!answers.length) return null;
     return { kind: 'choice', answers: answers, ids: ids, source: 'ии' };
+  }
+
+  /* После ответа ИИ вставляем решение в редактор сами и жмём «Запустить код» —
+     человек сразу видит результат, а не переносит код руками.
+     «Отправить на проверку» при этом НЕ нажимаем: отправка — это решение
+     человека, а запуск кода ничего не портит и ничего не отправляет наружу.      */
+  async function autoApply(ctx) {
+    if (!aiAnswer || aiAnswer.key !== ctx.key || !aiAnswer.text) return { skipped: 'нет ответа' };
+    if (aiAnswer.truncated) {
+      aiLogAdd('вставлять нечего: ответ неполный', 'sys');
+      return { skipped: 'ответ обрезан' };
+    }
+
+    /* карточка задания дорисовывается не сразу — даём ей шанс появиться */
+    if (!insertTarget()) await waitFor(insertTarget, 6000, 250);
+    if (!insertTarget()) {
+      aiLogAdd('вставить некуда: на шаге нет ни редактора, ни вариантов', 'sys');
+      return { skipped: 'нет места для вставки' };
+    }
+
+    var kind = aiAnswer.kind === 'choice' ? 'choice' : 'code';
+    var res;
+    if (kind === 'choice') {
+      var picked = choiceFromText(aiAnswer.text);
+      res = picked ? writeChoice(picked) : { ok: false, error: 'варианты не распознаны' };
+    } else {
+      res = await writeCode(aiAnswer.text);
+    }
+    if (!res || !res.ok) {
+      aiLogAdd('вставить не получилось: ' + ((res && res.error) || 'неизвестная причина'), 'sys');
+      return { skipped: (res && res.error) || 'ошибка вставки' };
+    }
+    aiLogAdd('вставил решение в редактор', 'sys');
+    var target = insertTarget();
+    if (target) flash(target.anchor);
+
+    /* Кнопка запуска появляется вместе с редактором, поэтому ждём её, а не
+       жмём сразу: у только что вставленного кода Stepik может ещё не успеть
+       разбудить панель запуска.                                               */
+    await sleep(400);
+    var btn = await waitFor(runButton, 4000, 250);
+    if (!btn) {
+      aiLogAdd('кнопку «Запустить код» не нашёл — запусти сам', 'sys');
+      return { inserted: true, ran: false };
+    }
+    try { btn.click(); } catch (e) { /* ignore */ }
+    aiLogAdd('нажал «Запустить код» — результат ниже', 'sys');
+    return { inserted: true, ran: true };
   }
 
   /* Решение ИИ уезжает в общее хранилище: иначе кнопка «вставить» ищет ответ
@@ -2494,41 +2614,82 @@ async function jobCollect(ctx, target) {
     return log;
   }
 
-  /* одна строка в ленте. kind: 'me' — наш вопрос, 'sys' — служебное, 'err' — ошибка */
+  /* одна строка в ленте. kind: 'me' — наш вопрос, 'sys' — служебное, 'err' — ошибка.
+     Для кода оборачиваем в .sgx-ai-codewrap и кладём кнопку копирования ВНУТРЬ
+     области кода: раньше она стояла в шапке блока, далеко от самого решения, и
+     её приходилось искать. Теперь она в правом верхнем углу кода и появляется
+     при наведении — как в редакторах кода.                                    */
   function aiLogAdd(text, kind, monospace) {
     var log = aiLogEl();
     if (!log || !text) return null;
     var el = document.createElement('div');
     el.className = 'sgx-ai-msg' + (kind ? ' ' + kind : '') + (monospace ? ' sgx-ai-code' : '');
     el.textContent = text;
+
+    if (monospace) {
+      var wrap = document.createElement('div');
+      wrap.className = 'sgx-ai-codewrap';
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'sgx-ai-codecopy';
+      btn.title = 'Скопировать';
+      btn.innerHTML = icon('copy', 14);
+      btn.addEventListener('click', function () {
+        copyText(text);
+        btn.classList.add('done');
+        setTimeout(function () { btn.classList.remove('done'); }, 1200);
+      });
+      wrap.appendChild(btn);
+      wrap.appendChild(el);
+      log.appendChild(wrap);
+      log.scrollTop = log.scrollHeight;
+      return el;
+    }
+
     log.appendChild(el);
     log.scrollTop = log.scrollHeight;
     return el;
   }
 
-  /* индикатор «думает» — чтобы было видно, что скрипт жив, а не завис */
+  /* индикатор «думает» — чтобы было видно, что скрипт жив, а не завис.
+     Со счётчиком секунд: «думает» без цифр выглядит одинаково и на второй
+     секунде, и на второй минуте, и человек не понимает, идёт работа или нет.   */
   function aiLogThink(label) {
     var log = aiLogEl();
     if (!log) return null;
     var el = document.createElement('div');
     el.className = 'sgx-ai-think';
     el.innerHTML = '<span>' + escapeHtml(label || 'ИИ думает') + '</span>' +
-      '<span class="sgx-ai-dots"><span></span><span></span><span></span></span>';
+      '<span class="sgx-ai-dots"><span></span><span></span><span></span></span>' +
+      '<span class="sgx-ai-secs">0 с</span>';
     log.appendChild(el);
     log.scrollTop = log.scrollHeight;
+
+    var started = Date.now();
+    var secs = el.querySelector('.sgx-ai-secs');
+    el.__sgxTimer = setInterval(function () {
+      if (!el.parentNode) { clearInterval(el.__sgxTimer); return; }
+      var s = Math.round((Date.now() - started) / 1000);
+      if (secs) secs.textContent = s + ' с';
+      /* если ответ идёт долго — прямо говорим, что ждём сервис, а не «висим» */
+      if (s === 20 && secs) secs.textContent = s + ' с — сервис отвечает медленно';
+    }, 1000);
     return el;
+  }
+
+  /* Убрать индикатор «думает»: держать его рядом с готовым ответом нельзя —
+     выглядит так, будто работа ещё идёт. Таймер счётчика гасим вместе с ним,
+     иначе он продолжит тикать вхолостую до перезагрузки страницы.              */
+  function dropThink(el) {
+    if (!el) return;
+    if (el.__sgxTimer) { clearInterval(el.__sgxTimer); el.__sgxTimer = null; }
+    if (el.parentNode) el.parentNode.removeChild(el);
   }
 
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
-  }
-
-  /* Убрать индикатор «думает»: держать его рядом с готовым ответом нельзя —
-     выглядит так, будто работа ещё идёт. */
-  function dropThink(el) {
-    if (el && el.parentNode) el.parentNode.removeChild(el);
   }
 
   /* Скопировать текст в буфер. В ленте нет поля ввода, поэтому копируем через
@@ -2686,7 +2847,10 @@ async function jobCollect(ctx, target) {
         if (t2.length > 20) parts.push(t2);
       }
     }
-    var text = parts.join('\n').slice(0, 1800);
+    /* Теория — это контекст, а не задание: 800 символов хватает, чтобы понять
+       уровень урока, а всё сверх этого только раздувает запрос и замедляет
+       ответ.                                                                   */
+    var text = parts.join('\n').slice(0, 800);
     if (!text) return '';
 
     /* На странице задания тот же контейнер держит условие, а не лекцию: запомнить
@@ -2906,29 +3070,22 @@ async function jobCollect(ctx, target) {
       '<div class="sgx-ai-head">',
       '<ul class="sgx-ai-tabs"><li class="sgx-ai-tab active">' + icon('code', 14) + 'Код</li></ul>',
       '<div class="sgx-ai-tools">',
-      '<button class="sgx-ai-tool" id="sgx-ai-copy" type="button" title="Скопировать решение">' +
-      icon('copy', 14) + '</button>',
-      '<button class="sgx-ai-tool" id="sgx-ai-reset" type="button" title="Сбросить">' +
-      icon('broom', 14) + '</button>',
+      /* Копирование переехало внутрь области кода (см. aiLogAdd) — здесь его нет:
+         кнопка рядом с кодом нужнее, чем кнопка в шапке.                      */
       '<span class="sgx-ai-lang" id="sgx-ai-lang">ИИ</span>',
       /* Модель меняется здесь же, рядом с решением: если одна отвечает медленно
          или обрывает ответ по лимиту, человек тут же переключается и повторяет
          запрос, не уходя в меню Tampermonkey.                                  */
       '<select class="sgx-ai-model" id="sgx-ai-model" title="Модель ИИ"></select>',
+      '<button class="sgx-ai-tool" id="sgx-ai-reset" type="button" title="Сбросить">' +
+      icon('broom', 14) + '</button>',
       '</div></div>',
       '<div class="sgx-ai-log" id="sgx-ai-log"></div>',
       '</div>'
     ].join('');
 
-    /* Кнопки блока — как в родном редакторе Stepik: скопировать решение и сбросить
-       ленту. Печатать здесь нечего, поэтому кроме этих двух действий и выбора
-       модели в блоке ничего не нажимается.                                       */
-    root.querySelector('#sgx-ai-copy').addEventListener('click', function () {
-      var ctx = stepContext();
-      var text = (ctx && aiAnswerAt(ctx.key)) || (aiAnswer && aiAnswer.text) || '';
-      if (!text) { toast('Копировать нечего — ИИ ещё не отвечал на этом шаге'); return; }
-      copyText(text);
-    });
+    /* В блоке только одно действие — сброс ленты. Печатать здесь нечего, а
+       копирование живёт в самом коде.                                          */
     root.querySelector('#sgx-ai-reset').addEventListener('click', function () {
       aiLogClear();
       aiShow(false);
