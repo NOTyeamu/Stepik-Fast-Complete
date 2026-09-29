@@ -70,7 +70,9 @@ function makeFetch(state) {
         return ok(index, 'json');
       }
       const hit = Object.values(state.store).find((it) => it.file === name);
-      if (!hit) return fail(404);
+      /* 404 по конкретному файлу считаем отдельно: именно так выглядит ответ,
+         который уже лежит в очереди, но ещё не перенесён роботом в answers/. */
+      if (!hit) { state.rawMisses = (state.rawMisses || 0) + 1; return fail(404); }
       return ok(hit.content);
     }
 
@@ -130,7 +132,7 @@ function makeFetch(state) {
   };
 }
 
-function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiPaidDown, aiPaidText, aiPaidEmpty, aiKey, aiPaidQueue, checkHint, checkHintAt, cmMode }) {
+function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiPaidDown, aiPaidText, aiPaidEmpty, aiKey, aiPaidQueue, checkHint, checkHintAt, cmMode, seedTheory }) {
   return new Promise((resolve, reject) => {
     const dom = new JSDOM(html, { url, runScripts: 'dangerously', pretendToBeVisual: true });
     const { window } = dom;
@@ -146,6 +148,10 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
     };
     if (job) state.storage.job = JSON.stringify(job);
     if (aiKey !== undefined) state.storage.aiKey = aiKey;
+    /* Теорию урока скрипт запоминает, пока её читают, и достаёт на задании.
+       Чтобы проверить это без второго прогона, кладём кэш заранее — так же, как
+       его оставил бы прочитанный урок.                                           */
+    if (seedTheory) state.storage.theory = JSON.stringify(seedTheory);
     if (innerWidth) Object.defineProperty(window, 'innerWidth', { value: innerWidth, configurable: true });
 
     /* скриншот: html2canvas подменяем, реального рендера в jsdom нет */
@@ -316,9 +322,9 @@ function openPanelIn(win, st) {
   }
 }
 
-/* Лента решения ИИ живёт внутри панели. Панель создаётся по клику, но «Спросить ИИ»
-   теперь создаёт её сам — поэтому лента уже должна быть на месте. Если её нет,
-   открываем панель кнопкой в шапке (или через меню, если шапки нет). */
+/* Лента решения ИИ живёт в блоке рядом с редактором кода (карточка задания), а не
+   в боковом меню. Блок создаётся сам при «Спросить ИИ»; если его нет, пробуем
+   открыть панель кнопкой в шапке — на всякий случай, вдруг разметка другая. */
 function aiFeedText(win, st) {
   let log = win.document.querySelector('#sgx-ai-log');
   if (!log) {
@@ -328,9 +334,19 @@ function aiFeedText(win, st) {
   return log ? log.textContent : '';
 }
 
+/* Блок ИИ показан, если корень получил класс on и стоит в документе. Именно так
+   мы отличаем «блок создан, но спрятан» от «блок показан». */
 function aiPanelShown(win) {
-  const p = win.document.querySelector('#sgx-ai-panel');
-  return !!(p && !p.hidden);
+  const root = win.document.querySelector('#sgx-ai-root');
+  return !!(root && root.classList.contains('on') && root.parentNode);
+}
+
+/* Где стоит блок ИИ: должен оказаться в карточке задания рядом с редактором,
+   а не в боковом меню курса. Возвращаем, к какому контейнеру он прикреплён. */
+function aiHostOf(win) {
+  const root = win.document.querySelector('#sgx-ai-root');
+  if (!root) return null;
+  return root.closest('.quiz-plugin, .code-editor-quiz__editor, .code-quiz__code, .attempt-wrapper__content, .lesson-sidebar__content');
 }
 
 const HTML = `<!doctype html><html><body>
@@ -495,6 +511,91 @@ const AI_CHOICE_HTML = `<!doctype html><html><body>
       </div>
     </div>
   </div></div>
+</body></html>`;
+
+/* Ровно та вёрстка редактора, которую прислал человек: .quiz-plugin внутри
+   .code-editor-quiz__editor.code-quiz__code со шапкой (вкладка «Код», копирование,
+   веник, селект языка) и таблицей тестов в формате __header-row / __data-row,
+   где значение лежит в data-clipboard-text кнопки «копировать». По этой странице
+   проверяем и место блока ИИ, и разбор тестов, и склейку «вход → выход». */
+const QUIZ_PLUGIN_HTML = `<!doctype html><html><body>
+  ${SHELL_HTML}
+  <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+    <div class="step-inner page-fragment">
+      <div class="html-content rich-text-viewer">
+        <span><p>Напишите программу, которая проверяет, чётное ли число, и печатает True или False.</p></span>
+      </div>
+      <div class="step-text__samples-wrapper">
+        <div class="attempt-wrapper-samples">
+          <div class="attempt-wrapper-samples__header-row">
+            <div>№ Теста</div><div>Входные данные</div><div>Выходные данные</div>
+          </div>
+          <div class="attempt-wrapper-samples__data-row">
+            <div>1</div>
+            <div class="attempt-wrapper-samples__data-row-code">
+              <button type="button" data-clipboard-text="13">13</button>
+            </div>
+            <div class="attempt-wrapper-samples__data-row-content">
+              <span class="attempt-wrapper-samples__data-row-text">True</span>
+              <button type="button" data-clipboard-text="True">копировать</button>
+            </div>
+          </div>
+          <div class="attempt-wrapper-samples__data-row">
+            <div>2</div>
+            <div class="attempt-wrapper-samples__data-row-code">
+              <button type="button" data-clipboard-text="8">8</button>
+            </div>
+            <div class="attempt-wrapper-samples__data-row-content">
+              <span class="attempt-wrapper-samples__data-row-text">False</span>
+              <button type="button" data-clipboard-text="False">копировать</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="ember2575" class="quiz-plugin ember-view">
+      <div class="quiz-plugin__content">
+        <div class="code-editor-quiz__editor code-quiz__code">
+          <div class="code-editor-header">
+            <ul class="code-editor-tabs"><li><span class="code-editor-tab code-without-padding">Код</span></li></ul>
+            <div class="code-editor-header__buttons">
+              <button class="copy-code-btn" type="button" data-clipboard-text="# put your python code here">копировать</button>
+              <button class="clear-broom" type="button">Сбросить код</button>
+            </div>
+            <div class="select-box code-editor-header__select-language">
+              <select id="language">
+                <option data-qa="select_csharp">C#</option>
+                <option data-qa="select_python" data-selected>C#</option>
+              </select>
+            </div>
+          </div>
+          <div id="ember2681" class="code-editor is-ready">
+            <div class="CodeMirror"><textarea></textarea></div>
+          </div>
+          <div id="ember2683" class="code-runner ember-view code-quiz__run-panel">
+            <textarea id="id_coderunner_input"></textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+    <button class="submit" type="button">Отправить на проверку</button>
+  </div></div>
+</body></html>`;
+
+/* Страница-лекция: никакого задания нет, только теория. Её текст скрипт должен
+   запомнить для урока — чтобы потом на задании ИИ не лез в непройденное. */
+const THEORY_ONLY_HTML = `<!doctype html><html><body>
+  ${SHELL_HTML}
+  <div class="step-inner page-fragment">
+    <div class="html-content rich-text-viewer">
+      <span><p>Методы (или функции) в C# — это именованные блоки кода. Метод
+      объявляется так: <code>static void SayHello() { }</code>. Параметры
+      записываются в скобках и передают значения внутрь метода. Возвращаемое
+      значение задаётся перед именем: <code>static int Sum(int a, int b)</code>.
+      Ключевое слово void означает «метод ничего не возвращает». Хорошая практика —
+      давать методам говорящие имена, например IsEven, и не делать их слишком длинными.</p></span>
+    </div>
+  </div>
 </body></html>`;
 
 (async () => {
@@ -1425,6 +1526,217 @@ const AI_CHOICE_HTML = `<!doctype html><html><body>
         st.inbox[name]);
       check('выбран правильный id варианта', String(data.ids || '').indexOf('11') >= 0,
         'ids: ' + JSON.stringify(data.ids));
+    }
+  });
+
+  /* --- 39. блок ИИ стоит там, где редактор кода, а не в боковом меню ---------
+     Человек прислал разметку и сказал: решение должно появляться в области
+     .quiz-plugin рядом с редактором. Проверяем именно это, а не «где-нибудь». */
+  console.log('\n=== 39. блок ИИ появляется в области редактора кода ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3500));
+
+      const root = win.document.querySelector('#sgx-ai-root');
+      check('блок ИИ создан', !!root);
+      check('блок ИИ показан', aiPanelShown(win));
+      const host = aiHostOf(win);
+      check('блок ИИ стоит в карточке задания, а не в меню курса',
+        !!host && !host.classList.contains('lesson-sidebar__content'),
+        host ? host.className : 'нет контейнера');
+      check('блок ИИ прижат к редактору кода',
+        !!host && /quiz-plugin|code-editor-quiz__editor|code-quiz__code/.test(host.className),
+        host ? host.className : 'нет контейнера');
+      check('в блоке ИИ нет настроек «от и до»',
+        !/Пройти и отправить/.test((root || {}).textContent || ''), 'чисто');
+      check('вкладка называется «Код», как в редакторе сайта',
+        /Код/.test((root || {}).textContent || ''), 'вкладка есть');
+    }
+  });
+
+  /* --- 40. ответ без ``` и без ''' Python ''' ------------------------------- */
+  console.log('\n=== 40. ограждения и метка языка снимаются с ответа ИИ ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: "'''Python'''\nn = int(input())\nprint(n % 2 == 0)\n'''",
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3500));
+
+      const feed = aiFeedText(win, st);
+      check('в ленте нет тройных кавычек', !/'''/.test(feed), feed.slice(0, 60));
+      check('в ленте нет слова Python как метки', !/^Python\b/m.test(feed), feed.slice(0, 60));
+      const name = Object.keys(st.inbox)[0] || '';
+      check('в хранилище лежит чистый код', /int\(input\(\)\)/.test(st.inbox[name] || ''),
+        String(st.inbox[name] || '').slice(0, 60));
+      check('в файле нет ```-обёртки', !/```/.test(st.inbox[name] || ''));
+    }
+  });
+
+  console.log('\n=== 40a. ответ в ```python``` тоже чистится ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: '```python\nn = int(input())\nprint(n % 2 == 0)\n```',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3500));
+      const name = Object.keys(st.inbox)[0] || '';
+      const body = st.inbox[name] || '';
+      check('в хранилище нет ```', !/```/.test(body), body.slice(0, 40));
+      check('код сохранён целиком', /print\(n % 2 == 0\)/.test(body), body.slice(0, 60));
+    }
+  });
+
+  /* --- 41. тестовая таблица читается из data-clipboard-text ----------------- */
+  console.log('\n=== 41. тесты берутся из data-clipboard-text, а не из обрезанного текста ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['stepSamplesText', 'stepPrompt'],
+        `https://stepik.org/lesson/${LESSON}/step/8`);
+      const text = probe.stepSamplesText();
+      probe.close();
+      check('строка «№ Теста» не попала в данные', !/№ Теста/.test(text), text);
+      check('первый тест: вход 13 → выход True', /вход: 13/.test(text) && /выход: True/.test(text), text);
+      check('второй тест: вход 8 → выход False', /вход: 8/.test(text) && /выход: False/.test(text), text);
+      check('номер теста не выдуман и не сдвинут', /1\) вход: 13/.test(text), text);
+      check('слово «копировать» не попало в данные', !/копировать/.test(text), text);
+    }
+  });
+
+  /* Та же таблица, но со значениями прямо в ячейках (без кнопок копирования) и
+     вовсе без колонки номера теста. Вторая форма — из настоящей вёрстки с
+     усечённой карточкой; проверяем, что вход «5» не уедет как номер теста. */
+  console.log('\n=== 41a. тесты без кнопок копирования и без номеров теста ===');
+  {
+    const plainRow = (a, b) =>
+      '<div class="attempt-wrapper-samples__data-row">' +
+      `<div class="attempt-wrapper-samples__data-row-content"><span>${a}</span></div>` +
+      `<div class="attempt-wrapper-samples__data-row-content"><span>${b}</span></div></div>`;
+    const box = (rows) => `<!doctype html><html><body>
+      <div class="attempt-wrapper"><div class="attempt-wrapper__content">
+        <div class="step-text__samples-wrapper"><div class="attempt-wrapper-samples">
+          <div class="attempt-wrapper-samples__header-row">
+            <div>№ Теста</div><div>Входные данные</div><div>Выходные данные</div>
+          </div>${rows}
+        </div></div>
+      </div></div></body></html>`;
+
+    /* форма со своим номером теста в голом div */
+    const withNum = probeSandbox(box(
+      '<div class="attempt-wrapper-samples__data-row"><div>1</div>' +
+      '<div class="attempt-wrapper-samples__data-row-content"><span>5</span></div>' +
+      '<div class="attempt-wrapper-samples__data-row-content"><span>125</span></div></div>' +
+      '<div class="attempt-wrapper-samples__data-row"><div>2</div>' +
+      '<div class="attempt-wrapper-samples__data-row-content"><span>3</span></div>' +
+      '<div class="attempt-wrapper-samples__data-row-content"><span>27</span></div></div>'
+    ), ['stepSamplesText'], `https://stepik.org/lesson/${LESSON}/step/8`);
+    const t1 = withNum.stepSamplesText();
+    withNum.close();
+    check('вход 5 не принят за номер теста', /1\) вход: 5 → выход: 125/.test(t1), t1);
+    check('вторая пара тоже верна', /2\) вход: 3 → выход: 27/.test(t1), t1);
+
+    /* форма без колонки номера — нумеруем сами */
+    const noNum = probeSandbox(box(plainRow(4, 16) + plainRow(7, 49)),
+      ['stepSamplesText'], `https://stepik.org/lesson/${LESSON}/step/8`);
+    const t2 = noNum.stepSamplesText();
+    noNum.close();
+    check('без номеров теста строки нумеруются по порядку',
+      /1\) вход: 4 → выход: 16/.test(t2) && /2\) вход: 7 → выход: 49/.test(t2), t2);
+  }
+
+  /* --- 42. ИИ знает уровень урока и пройденную теорию ----------------------- */
+  console.log('\n=== 42. в запрос ИИ уходит урок и пройденная теория ===');
+  await run({
+    url: `https://stepik.org/lesson/1755852/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    seedTheory: { 1755852: { text: 'Методы в C#: static void SayHello() { }. void ничего не возвращает. IsEven — хорошее имя.',
+      at: Date.now(), step: 1 } },
+    aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+      const body = (st.aiPaidCalls[0] && st.aiPaidCalls[0].body) || '';
+      check('в запросе назван номер урока', /Урок 4\.1/.test(body), body.slice(0, 120));
+      check('в запросе есть название урока', /Знакомство с методами/.test(body), 'название есть');
+      check('до ИИ дошла пройденная теория', /IsEven/.test(body), 'теория есть');
+      check('ИИ просят держаться пройденного', /не используй конструкции|Не используй конструкции/i.test(body),
+        'правило есть');
+    }
+  });
+
+  /* --- 42a. теория запоминается, пока её читают ----------------------------- */
+  console.log('\n=== 42a. теория со страницы-лекции запоминается для урока ===');
+  await run({
+    url: `https://stepik.org/lesson/1755852/step/1?unit=1818966`,
+    store: {}, submissions: [], html: THEORY_ONLY_HTML, waitMs: 5000,
+    afterRun: async (win, st) => {
+      let saved = {};
+      try { saved = JSON.parse(st.storage.theory || '{}'); } catch (e) { /* ignore */ }
+      const rec = saved[1755852];
+      check('теория урока сохранена в память', !!(rec && rec.text), JSON.stringify(Object.keys(saved)));
+      check('в памяти именно текст лекции', /IsEven|void/.test((rec && rec.text) || ''),
+        String((rec && rec.text) || '').slice(0, 60));
+    }
+  });
+
+  /* --- 43. ИИ просят проверить себя на тестах ------------------------------- */
+  console.log('\n=== 43. ИИ обязан сам сверить ответ с тестами ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 2000));
+      const body = (st.aiPaidCalls[0] && st.aiPaidCalls[0].body) || '';
+      check('в запросе есть просьба прогнать тесты', /мысленно выполни свой код/.test(body),
+        'просьба есть');
+      check('в запросе есть сверка вывода посимвольно', /посимвольно|сравни полученный вывод/i.test(body),
+        'сверка есть');
+      check('в системном тексте есть правило самопроверки', /прогони свой код/.test(body),
+        'правило есть');
+    }
+  });
+
+  /* --- 44. «вставить» под своим решением ИИ не ловит 404 -------------------- */
+  console.log('\n=== 44. вставка ответа ИИ работает, пока файл не доехал в answers/ ===');
+  await run({
+    url: `https://stepik.org/lesson/1848840/step/10?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 11000, cmMode: 'text/x-python',
+    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3500));
+      /* файл в очередь ушёл, а raw.githubusercontent.com его ещё не отдаёт */
+      check('ответ ИИ опубликован', Object.keys(st.inbox).length === 1,
+        Object.keys(st.inbox).join(','));
+
+      /* а теперь жмём «вставить» — раньше здесь была ошибка про HTTP 404 */
+      openPanelIn(win, st);
+      await new Promise((r) => setTimeout(r, 300));
+      const chip = win.document.querySelector('#sgx-chip');
+      const yes = chip && chip.querySelector('.sgx-act.yes');
+      check('скоба предлагает вставить ответ ИИ', !!yes, 'скобы нет');
+      if (yes) yes.click();
+      await new Promise((r) => setTimeout(r, 800));
+      const status = statusText(win);
+      check('нет ошибки про HTTP 404', !/HTTP 404/.test(status), status);
+      check('нет ошибки «не читается»', !/не читается/.test(status), status);
+      /* Своего ответа хватает из памяти: в сеть за ним ходить не надо вовсе.
+         Именно поэтому 404 и не случается — он приходил из лишнего запроса. */
+      check('файл не запрашивали из answers/ — обошлись своей копией',
+        !st.rawMisses, 'промахов: ' + st.rawMisses);
+      check('код ИИ доехал до редактора', /n % 2 == 0/.test(st.setValue || ''),
+        JSON.stringify(st.setValue || ''));
     }
   });
 

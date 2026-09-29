@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.2.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ, а если тесты не прошли — прочитает ошибку и попробует исправить сам.
+// @version      6.3.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, без ```-обёрток, с учётом уровня урока и с самопроверкой по тестовым данным. Если тесты не прошли — ИИ прочитает ошибку и попробует исправить сам.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
@@ -29,6 +29,11 @@
  *    чтобы поймать отправку в момент нажатия «Отправить».
  *  • На шаге, для которого решение уже есть, справа от карточки появляется скоба
  *    ( есть решение · вставить / нет ).
+ *  • Где решения ещё нет, его подсказывает ИИ. Ответ появляется прямо в карточке
+ *    задания — там же, где редактор кода, и в его стиле. Из ответа снимаются
+ *    ```-обёртки и метка языка, поэтому он копируется одним нажатием. Модель знает,
+ *    что уже проходили в уроке (текст лекции запоминается, пока её читают), держится
+ *    этого уровня и сама сверяет вывод с тестовыми данными перед ответом.
  *
  * ГДЕ ЛЕЖИТ
  *    Исходник и установка: https://github.com/NOTyeamu/Stepik-Fast-Complete
@@ -52,7 +57,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.2.0';
+  var VERSION = '6.3.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -203,14 +208,63 @@
     return items;
   }
 
+  /* Ответ, который мы только что положили в очередь inbox/, лежит в answers/
+     ещё не сразу: робот переносит файл за секунды, а CDN отдаёт старый каталог
+     до пяти минут. Поэтому у «своей» записи в pending стоит local:true — читать
+     её из сети бессмысленно, содержимое у нас уже под рукой.                    */
+  function localItem(key) {
+    var p = pending[key];
+    if (!p || !p.item || !p.local || !p.content) return null;
+    return { key: key, kind: p.item.kind, content: p.content, local: true };
+  }
+
   async function storeItem(key) {
+    /* своё, ещё не перенесённое роботом — отдаём сразу, без похода в сеть */
+    var mine = localItem(key);
+    if (mine) return mine;
+
     var it = cacheIndex()[key];
     if (!it) throw new Error('в хранилище нет ответа для ' + key);
-    var res = await fetch(rawUrl(it.file), { headers: { Accept: 'text/plain' } });
-    if (!res.ok) throw new Error('ответ ' + it.file + ' не читается (HTTP ' + res.status + ')');
+
+    var res = null;
+    try {
+      res = await fetch(rawUrl(it.file), { headers: { Accept: 'text/plain' } });
+    } catch (e) {
+      res = null;
+    }
+    /* Сеть отдала 404 — файл ещё не доехал до answers/ (или CDN держит старый
+       каталог). Тогда читаем содержимое из памяти: оно там есть, раз ответ
+       только что подсказал ИИ. Без этого кнопка «вставить» под своим же
+       решением отвечала «ответ l…_s10.py не читается (HTTP 404)».              */
+    if (!res || !res.ok) {
+      var fallback = aiItemFromMemory(key, it);
+      if (fallback) return fallback;
+      throw new Error('ответ ' + it.file + ' не читается (HTTP ' + (res ? res.status : 'сеть') + ')');
+    }
     var content = await res.text();
-    if (!content.trim()) throw new Error('файл ' + it.file + ' пуст');
+    if (!content.trim()) {
+      var alt = aiItemFromMemory(key, it);
+      if (alt) return alt;
+      throw new Error('файл ' + it.file + ' пуст');
+    }
     return { key: key, kind: it.kind, content: content };
+  }
+
+  /* Решение ИИ, которое ещё не доехало до answers/, но лежит в памяти. Для теста
+     с выбором текст модели — это «2. Вариант такой-то», а вставка ждёт те же
+     варианты, что и автосохранение, поэтому приводим его к JSON тем же способом,
+     что и saveAiToStore. Без этого «вставить» на тесте с выбором падал бы на
+     JSON.parse, хотя ответ у нас на руках.                                      */
+  function aiItemFromMemory(key, it) {
+    var text = aiAnswerAt(key);
+    if (!text || !aiAnswer) return null;
+    var kind = aiAnswer.kind || (it && it.kind) || 'code';
+    if (kind === 'choice') {
+      var picked = choiceFromText(text);
+      if (!picked) return null;
+      return { key: key, kind: 'choice', content: JSON.stringify(picked), local: true };
+    }
+    return { key: key, kind: kind, content: text, local: true };
   }
 
   async function saveAnswer(ctx, ans, force) {
@@ -244,9 +298,11 @@
     }
 
     /* робот перенесёт файл за секунды, но CDN ещё до пяти минут отдаёт старый
-       индекс — поэтому держим шаг в своём списке, пока он там не появится */
+       индекс — поэтому держим шаг в своём списке, пока он там не появится.
+       content кладём рядом: пока файла нет в answers/, «вставить» берёт его
+       отсюда, а не ловит 404 в raw.githubusercontent.com.                       */
     var entry = { key: ctx.key, file: name, kind: item.kind, ext: item.ext };
-    pending[ctx.key] = { at: Date.now(), item: entry };
+    pending[ctx.key] = { at: Date.now(), item: entry, local: true, content: item.content };
     savePending();
     cache.items[ctx.key] = entry;
     cache.at = Date.now();
@@ -791,31 +847,44 @@
     '#sgx-panel .sgx-status{padding:10px 16px 14px;font-size:12.5px;color:rgba(255,255,255,.72);min-height:34px;line-height:1.45}',
     /* --- блок ИИ внутри панели: повторяет родной редактор кода Stepik --- */
     '#sgx-panel .sgx-ai[hidden]{display:none}',
-    '#sgx-ai-panel{margin:2px 0 0;border-top:1px solid rgba(255,255,255,.10)}',
+    /* --- блок ИИ: живёт на месте редактора кода в карточке задания ---
+       Раньше он стоял в боковом меню рядом с настройками, и это было не то:
+       решение должно появляться там, где человек и ждёт код, — в области
+       .code-editor-quiz__editor. Поэтому блок оформлен как родной редактор:
+       светлая шапка с вкладкой «Код», кнопками копирования и сброса, меткой
+       языка и тёмным полем под код — как у Stepik.                             */
+    '#sgx-ai-root{display:none;width:100%;box-sizing:border-box;margin:10px 0 0;',
+    'border:1px solid #E3E3E1;border-radius:8px;background:#fff;overflow:hidden;',
+    'font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#2C2C2B}',
+    '#sgx-ai-root.on{display:block}',
+    '#sgx-ai-root *{box-sizing:border-box}',
     '#sgx-ai-panel .sgx-ai-head{display:flex;align-items:center;justify-content:space-between;',
-    'gap:8px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,.10)}',
+    'gap:8px;padding:7px 10px;background:#F7F7F6;border-bottom:1px solid #E3E3E1}',
     '#sgx-ai-panel .sgx-ai-tabs{display:flex;align-items:center;gap:6px;margin:0;padding:0;list-style:none}',
-    '#sgx-ai-panel .sgx-ai-tab{display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:6px;',
-    'font-size:12.5px;color:rgba(255,255,255,.72)}',
-    '#sgx-ai-panel .sgx-ai-tab.active{color:#fff;background:rgba(255,255,255,.08)}',
+    '#sgx-ai-panel .sgx-ai-tab{display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:5px;',
+    'font-size:12.5px;font-weight:600;color:#4B4A47}',
+    '#sgx-ai-panel .sgx-ai-tab.active{color:#1F1D1B;background:#EAEAE8}',
     '#sgx-ai-panel .sgx-ic{flex:0 0 auto}',
     '#sgx-ai-panel .sgx-ai-tools{display:flex;align-items:center;gap:4px}',
     '#sgx-ai-panel .sgx-ai-tool{display:flex;align-items:center;justify-content:center;width:26px;height:26px;',
-    'padding:0;border:0;border-radius:6px;background:transparent;color:rgba(255,255,255,.66);cursor:pointer}',
-    '#sgx-ai-panel .sgx-ai-tool:hover{background:rgba(255,255,255,.10);color:#fff}',
-    '#sgx-ai-panel .sgx-ai-lang{padding:3px 8px;border-radius:6px;background:rgba(255,255,255,.06);',
-    'font-size:11.5px;color:rgba(255,255,255,.66)}',
-    /* лента: только чтение, ничего не печатается руками */
-    '#sgx-ai-panel .sgx-ai-log{max-height:46vh;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px}',
-    '#sgx-ai-panel .sgx-ai-msg{font-size:12.5px;line-height:1.5;color:rgba(255,255,255,.86)}',
-    '#sgx-ai-panel .sgx-ai-msg.me{align-self:flex-start;padding:6px 10px;border-radius:10px;',
-    'background:rgba(76,175,80,.16);color:#CFEBD2;font-size:12px}',
-    '#sgx-ai-panel .sgx-ai-msg.sys{color:rgba(255,255,255,.55);font-size:11.5px;font-style:italic}',
-    '#sgx-ai-panel .sgx-ai-code{margin:0;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.28);',
-    'color:#E6E6E6;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
+    'padding:0;border:0;border-radius:5px;background:transparent;color:#6B6A67;cursor:pointer}',
+    '#sgx-ai-panel .sgx-ai-tool:hover{background:#E6E6E4;color:#1F1D1B}',
+    '#sgx-ai-panel .sgx-ai-lang{padding:3px 9px;border-radius:5px;border:1px solid #E3E3E1;background:#fff;',
+    'font-size:11.5px;color:#5A5955}',
+    '#sgx-ai-panel .sgx-ai-lang.busy{color:#8A6D1F;border-color:#E8D9A8;background:#FDF7E3}',
+    /* лента: только чтение, ничего не печатается руками. Тёмное поле — как у
+       редактора кода на сайте, поэтому блок не выглядит чужеродным.            */
+    '#sgx-ai-panel .sgx-ai-log{max-height:44vh;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;',
+    'background:#2B2B2B}',
+    '#sgx-ai-panel .sgx-ai-msg{font-size:12.5px;line-height:1.5;color:rgba(255,255,255,.88)}',
+    '#sgx-ai-panel .sgx-ai-msg.me{align-self:flex-start;padding:6px 10px;border-radius:8px;',
+    'background:rgba(76,175,80,.18);color:#CFEBD2;font-size:12px}',
+    '#sgx-ai-panel .sgx-ai-msg.sys{color:rgba(255,255,255,.5);font-size:11.5px;font-style:italic}',
+    '#sgx-ai-panel .sgx-ai-code{margin:0;padding:10px 12px;border-radius:6px;background:rgba(0,0,0,.25);',
+    'color:#E8E8E8;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
     'white-space:pre-wrap;overflow-wrap:anywhere}',
-    '#sgx-ai-panel .sgx-ai-err{margin:0;padding:9px 11px;border-radius:8px;background:rgba(229,115,115,.14);',
-    'border-left:3px solid #E57373;color:#F3D3D3;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
+    '#sgx-ai-panel .sgx-ai-err{margin:0;padding:9px 11px;border-radius:6px;background:rgba(229,115,115,.16);',
+    'border-left:3px solid #E57373;color:#F6D8D8;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
     'white-space:pre-wrap;overflow-wrap:anywhere}',
     /* «думает» — живой индикатор, чтобы было видно, что работа идёт */
     '#sgx-ai-panel .sgx-ai-think{display:flex;align-items:center;gap:7px;font-size:12px;color:rgba(255,255,255,.6)}',
@@ -1031,6 +1100,7 @@
   try { job = JSON.parse(GM_getValue(JOB_KEY, 'null')); } catch (e) { job = null; }
   var jobBusy = false;
   var lastDocUrl = '';
+  var lastTheoryAt = 0;                /* когда в прошлый раз собирали теорию урока */
   var lastNav = '';
 
   /* сколько ждём открытия шага, прежде чем признать переход неудачным.
@@ -1657,26 +1727,81 @@ async function jobCollect(ctx, target) {
     return parts.join('\n');
   }
 
-  /* Таблица «вход → выход»: самое ценное для ИИ — по ней он понимает формат ввода.
-     В строке первым идёт номер теста, дальше вход и выход, поэтому берём только
-     ячейки .attempt-wrapper-samples__data-row-content и разбираем их по порядку.
-     Колонок может быть и одна (усечённая карточка) — тогда пишем что есть, не
-     выдумывая пустой «выход».                                                   */
+  /* Таблица «вход → выход»: самое ценное для ИИ — по ней он понимает формат ввода
+     и результат. В текущей вёрстке Stepik строка такая:
+       <div class="attempt-wrapper-samples__header-row">№ Теста | Входные | Выходные</div>
+       <div class="attempt-wrapper-samples__data-row">
+         <div>1</div>
+         <div class="attempt-wrapper-samples__data-row-code">
+           <button data-clipboard-text="13">…</button></div>
+         <div class="attempt-wrapper-samples__data-row-content">
+           <span class="attempt-wrapper-samples__data-row-text">13</span> … </div>
+     Значение надёжнее брать из data-clipboard-text: там оно лежит целиком, тогда
+     как видимый текст бывает обрезан «…».                                       */
+
+  /* Ячейки данных: вход и выход. Номер теста в них не попадает — он лежит голым
+     <div>1</div> без класса, поэтому искать его надо среди прямых детей строки.  */
+  var SAMPLE_VAL = '.attempt-wrapper-samples__data-row-code,' +
+    '.attempt-wrapper-samples__data-row-content';
+
+  function isDataCell(node) {
+    if (!node || !node.classList) return false;
+    return node.classList.contains('attempt-wrapper-samples__data-row-code') ||
+      node.classList.contains('attempt-wrapper-samples__data-row-content');
+  }
+
+  /* Номер теста. Раньше «номером» считалась первая ячейка, если её текст похож на
+     одно-двузначное число, — и вход «5» или «13» уезжал как номер: в запрос
+     уходило «13) вход: True», то есть вход и выход перепутанными. Ячейка данных
+     номером быть не может по определению, поэтому смотрим только на прочих
+     прямых детей строки.                                                        */
+  function testNumberOf(row) {
+    var kids = Array.prototype.slice.call(row.children || []);
+    for (var i = 0; i < kids.length; i++) {
+      if (isDataCell(kids[i])) continue;
+      var t = norm(kids[i].textContent || '');
+      if (/^\d{1,3}$/.test(t)) return t;
+    }
+    return '';
+  }
+
+  function sampleValue(node) {
+    if (!node) return '';
+    /* кнопка «копировать» несёт полное значение в data-clipboard-text */
+    var btn = $('[data-clipboard-text]', node);
+    var raw = btn ? btn.getAttribute('data-clipboard-text') : '';
+    if (raw && raw.trim()) return raw.replace(/\s+$/, '');
+    var txt = norm(node.textContent || '');
+    /* обрезанный «…» в конце видимого текста — признак, что значение неполное */
+    return txt.replace(/…$/, '').trim();
+  }
+
   function stepSamplesText() {
     var box = $('.step-text__samples-wrapper') ||
-      $('.attempt-wrapper-samples-wrapper');
+      $('.attempt-wrapper-samples-wrapper') || $('.attempt-wrapper-samples');
     if (!box) return '';
     var rows = $$('.attempt-wrapper-samples__data-row', box);
     var out = [];
+    var n = 0;
     for (var i = 0; i < rows.length; i++) {
-      var cells = $$('.attempt-wrapper-samples__data-row-content', rows[i]);
+      var row = rows[i];
+      var cells = $$(SAMPLE_VAL, row);
       if (!cells.length) continue;
-      /* склеиваем «сырой» текст ячейки, но выкидываем подписи кнопок «копировать» */
-      var vals = cells.map(function (c) { return norm(c.textContent || ''); });
-      vals = vals.filter(function (v) { return v.length; });
+
+      /* номер теста берём не из ячеек данных, а из остальных детей строки */
+      var num = testNumberOf(row);
+
+      var vals = [];
+      for (var j = 0; j < cells.length; j++) {
+        var v = sampleValue(cells[j]);
+        if (v) vals.push(v);
+      }
       if (!vals.length) continue;
-      var line = (i + 1) + ') вход: ' + vals[0];
+
+      n++;
+      var line = (num || n) + ') вход: ' + vals[0];
       if (vals.length > 1) line += ' → выход: ' + vals[1];
+      if (vals.length > 2) line += ' (' + vals.slice(2).join(' | ') + ')';
       out.push(line);
     }
     if (out.length) return 'Тестовые данные:\n' + out.join('\n');
@@ -1690,6 +1815,49 @@ async function jobCollect(ctx, target) {
     var text = norm((cond + '\n' + samples).replace(
       /Отправить на проверку|Решить снова|Скачать|Показать ответ|Тестовые данные(?=\s*№)/g, ' '));
     return text.slice(0, 2500);
+  }
+
+  /* Модель любит заворачивать решение в разметку: ```python … ``` или
+     '''Python …'''. Скопировать из такого блока нельзя — в редактор уедет
+     тройная кавычка и слово «Python», а на первом шаге это сразу видно.
+     Поэтому снимаем обёртку сами: и языковую метку, и сами ограждения.        */
+  function stripFences(text) {
+    var orig = String(text == null ? '' : text).replace(/\r\n/g, '\n').trim();
+    if (!orig) return '';
+    var s = orig;
+    var paired = false;             /* нашли ли настоящую пару ограждений */
+
+    /* ```python\n…\n``` — берём то, что внутри первых ограждений. Метку языка
+       читаем до конца строки: «```Python 3.6» — это тоже метка, а не код,
+       и хвост «3.6» в решение попасть не должен.                               */
+    var tick = s.match(/```[^\n]*\n([\s\S]*?)```/);
+    if (tick && tick[1] && tick[1].trim()) { s = tick[1].trim(); paired = true; }
+    /* ограждение с меткой и без переноса (одна строка кода): ```print(1)``` */
+    if (!paired) {
+      var one = s.match(/```[ \t]*([A-Za-z0-9+#.\-]*?)[ \t]*([\s\S]*?)```/);
+      if (one && one[2] && one[2].trim()) { s = one[2].trim(); paired = true; }
+    }
+
+    /* '''Python''' / """python""" — Python-строки-ограждения */
+    var quote = s.match(/^['"]{3}\s*[A-Za-z0-9+#.\-]*\s*\n?([\s\S]*?)\n?['"]{3}\s*$/);
+    if (quote && quote[1] && quote[1].trim()) { s = quote[1].trim(); paired = true; }
+
+    /* остатки: строка-метка языка (одно слово) в начале или конце */
+    var label = /^(?:```|''')?\s*(?:python|py|c#|csharp|c\+\+|cpp|java|javascript|js|typescript|ts|sql|kotlin|go|haskell|pascal|rust|ruby|php|swift|scala|r|bash|sh|shell|text|txt)\s*\d*(?:\.\d+)?\s*$/i;
+    var lines = s.split('\n');
+    while (lines.length && label.test(lines[0].trim())) lines.shift();
+    while (lines.length && label.test(lines[lines.length - 1].trim())) lines.pop();
+    if (lines.join('\n').trim()) s = lines.join('\n');
+
+    /* Одиночные ограждения по краям убираем только когда была настоящая пара:
+       иначе «```python» без продолжения превратилось бы в «python» — то есть
+       в мусор, который выглядит как код.                                        */
+    if (!paired) return s;
+    var stripped = s
+      .replace(/^\s*(?:```|'''|""")\s*$/gm, '')
+      .replace(/^\s*(?:```|'''|""")\s*|\s*(?:```|'''|""")\s*$/g, '')
+      .replace(/^\s*\n+|\n+\s*$/g, '');
+    return stripped.trim() ? stripped : orig;
   }
 
   /* Человеку показываем «Python 3.6», а не «text/x-python»: в панели рядом со
@@ -1734,9 +1902,44 @@ async function jobCollect(ctx, target) {
   }
 
   function aiSystem() {
-    return 'Ты помощник по программированию. Реши задание с платформы Stepik. ' +
-      'Ответь коротко: только решение, без пояснений и без markdown-разметки. ' +
-      'Если это код — дай готовый код целиком. Учти: тестируется через stdin → stdout.';
+    return 'Ты помощник студента на платформе Stepik. Реши задание и верни ТОЛЬКО ' +
+      'готовый ответ: без пояснений, без markdown-разметки, без ``` и без строки ' +
+      'с названием языка. Если это код — дай код целиком, одним куском. ' +
+      'Тестируется через stdin → stdout, строки могут содержать кириллицу и пробелы.\n' +
+      '\n' +
+      'Правила, которые важнее краткости:\n' +
+      '1. Решай на том уровне, который уже пройден в уроке. Не используй конструкции, ' +
+      'которых в теории урока ещё не было (генераторы, классы, лямбды, модули, ' +
+      'регулярки и т. п.), даже если так короче. Решение должно выглядеть так, будто ' +
+      'его написал студент после этой лекции.\n' +
+      '2. Если урок помечен как вводный — пиши максимально просто и прямолинейно.\n' +
+      '3. Перед ответом мысленно прогони свой код на всех тестовых данных из условия ' +
+      'и сравни результат с ожидаемым. Если не сходится хотя бы на одном — переделай ' +
+      'код. Не присылай код, который сам же не смог проверить.\n' +
+      '4. Убедись, что формат вывода совпадает с ожидаемым ровно: те же пробелы, ' +
+      'регистр и переводы строк, что в «выходных данных».';
+  }
+
+  /* Блок «где мы и что уже проходили» — общий и для первого ответа, и для правки:
+     модель должна видеть уровень урока в обоих случаях.                        */
+  function aiLessonBlock() {
+    var les = lessonNow();
+    var theory = stepTheoryText();
+    var out = '';
+    if (les && (les.label || les.title)) {
+      out += 'Урок ' + (les.label || '?') + (les.title ? ' — «' + les.title + '»' : '');
+      if (les.total && les.index) out += ' (' + les.index + '-й из ' + les.total + ' в курсе)';
+      out += '.';
+      /* первые уроки курса — почти всегда знакомство с языком: там сложные
+         конструкции выглядят особенно чужеродно.                               */
+      if (les.unit && les.unit <= 2) out += ' Это самое начало раздела — пиши проще некуда.';
+      out += '\n';
+    }
+    if (theory) {
+      out += 'Что уже разобрано в этом уроке (считай, что только это студент и знает):\n' +
+        theory + '\n';
+    }
+    return out;
   }
 
   function aiUser() {
@@ -1754,11 +1957,12 @@ async function jobCollect(ctx, target) {
     var task = stepPrompt();
     /* Тестовые данные — это и есть формат ввода-вывода: без них модель пишет код,
        который читает не то и выводит не так. Просим свериться с ними явно. */
-    var hint = /вход:/.test(task)
+    var hasSamples = /вход:/.test(task);
+    var hint = hasSamples
       ? '\nСверься с «Тестовые данные»: программа должна читать ровно то, что во «вход»,\n' +
         'и печатать ровно то, что в «выход».'
       : '';
-    var base = ask + hint + '\n\nУсловие:\n' + task;
+    var base = aiLessonBlock() + '\n' + ask + hint + '\n\nУсловие:\n' + task;
     if (ctx && ctx.prevCode) {
       base += '\n\nТвой прошлый ответ:\n' + String(ctx.prevCode).slice(0, 1800);
     }
@@ -1768,6 +1972,22 @@ async function jobCollect(ctx, target) {
         '\n\nНайди причину и пришли исправленное решение целиком. ' +
         'Если ошибка из-за чтения ввода — учитывай, что данные приходят через stdin, ' +
         'а строки могут содержать кириллицу и пробелы.';
+    }
+    /* Самопроверка. Модель отвечает «на глаз» и иногда присылает код, который
+       сам же не проходит примеры; просьба прогнать тесты на бумаге заметно
+       уменьшает долю таких ответов. Ошибку проверки сюда не подмешиваем: там
+       модель уже знает, что именно сломалось.                                   */
+    if (!ctx || !ctx.checkError) {
+      if (hasSamples) {
+        base += '\n\nПрежде чем ответить, проверь себя:\n' +
+          '— возьми каждую строку из «Тестовые данные» и мысленно выполни свой код;\n' +
+          '— сравни полученный вывод с «выходом» посимвольно, включая пробелы;\n' +
+          '— если хотя бы один пример не сошёлся, исправь код и проверь снова;\n' +
+          '— в ответ отправь уже проверенный вариант, без комментариев о проверке.';
+      } else {
+        base += '\n\nПрежде чем ответить, перечитай условие и убедись, что решение\n' +
+          'делает ровно то, что просят, и не использует непройденных конструкций.';
+      }
     }
     return base;
   }
@@ -1937,13 +2157,17 @@ async function jobCollect(ctx, target) {
       aiLogClear();
       aiLogAdd('шаг ' + ctx.step + ' · ' + langLabel(stepLanguage()), 'sys');
     }
-    var thinking = aiLogThink(fixed ? 'ИИ правит решение по ошибке теста' : 'ИИ думает над решением');
+    var thinking = aiLogThink(fixed ? 'ИИ правит решение по ошибке теста' : 'ИИ думает и проверяет себя');
+    aiMarkVerifying(true);
 
     try {
       var got = await aiCall(aiSystem(), aiUserFor(ctx), { retry: !fixed });
 
+      /* Снимаем ограждения сразу: и в ленте, и при копировании, и при вставке
+         в редактор человек должен видеть чистый ответ, а не ```python … ```. */
+      var clean = stripFences(got.text) || got.text;
       aiAnswer = {
-        key: ctx.key, text: got.text, at: Date.now(), model: got.model,
+        key: ctx.key, text: clean, at: Date.now(), model: got.model,
         kind: kind, lang: stepLanguage()
       };
       dropThink(thinking);
@@ -1957,6 +2181,7 @@ async function jobCollect(ctx, target) {
       saveAiToStore(ctx).catch(function (e) { log('публикация решения ИИ не удалась: ' + e.message); });
     } catch (e) {
       dropThink(thinking);
+      aiMarkVerifying(false);
       aiLogAdd(e.message, 'err');
       setStatus('ИИ не ответил — ' + e.message);
     } finally {
@@ -1991,6 +2216,7 @@ async function jobCollect(ctx, target) {
     var was = aiVia;
     aiLogAdd(err, 'err');
     aiLogAdd('пробую исправить сам…', 'sys');
+    aiMarkVerifying(true);
 
     var fixCtx = Object.assign({}, ctx);
     try { fixCtx.prevCode = await lastSubmissionCode(); } catch (e) { fixCtx.prevCode = prev; }
@@ -2000,12 +2226,13 @@ async function jobCollect(ctx, target) {
     try {
       got = await aiCall(aiSystem(), aiUserFor(fixCtx), { retry: false });
     } catch (e) {
+      aiMarkVerifying(false);
       aiLogAdd('ИИ не смог исправить — ' + e.message, 'err');
       return { skipped: 'ошибка канала: ' + e.message };
     }
 
     aiAnswer = {
-      key: ctx.key, text: got.text, at: Date.now(), model: got.model,
+      key: ctx.key, text: stripFences(got.text) || got.text, at: Date.now(), model: got.model,
       kind: aiAnswer.kind || 'code', lang: aiAnswer.lang || stepLanguage()
     };
     saveAi();
@@ -2104,24 +2331,37 @@ async function jobCollect(ctx, target) {
      работы («думает»), и ошибки тестов, и итоговый код.                        */
   function aiPanelEl() { return document.getElementById('sgx-ai-panel'); }
 
+  function aiRootEl() { return document.getElementById('sgx-ai-root'); }
+
   function aiLogEl() { return document.getElementById('sgx-ai-log'); }
 
-  /* Панель создаётся по нажатию кнопки в шапке. Но спросить ИИ можно и из меню
-     Tampermonkey — тогда панели ещё нет, и все записи в ленту молча уходили в
-     никуда: человек открывал панель и видел пустоту. Поэтому вызываем создание
-     панели сами и только потом показываем блок.                                 */
+  /* Блок ИИ живёт в карточке задания, а не в боковом меню. Спросить ИИ можно и из
+     меню Tampermonkey — тогда блока ещё нет, и все записи в ленту молча уходили
+     в никуда: человек открывал и видел пустоту. Поэтому сначала создаём блок и
+     ставим его на место, и только потом показываем.                            */
   function aiShow(on) {
     if (on === false) {
-      var off = aiPanelEl();
-      if (off) off.hidden = true;
+      var off = aiRootEl();
+      if (off) off.classList.remove('on');
       return;
     }
-    if (!aiPanelEl()) {
-      ensurePanel();
-      sidebarSlot();
+    if (!aiRootEl()) ensureAiRoot();
+    /* на странице задания места может ещё не быть — тогда пробуем и на следующем
+       тике: карточка дорисовывается асинхронно.                                */
+    if (!aiSlot()) {
+      var tries = 0;
+      var timer = setInterval(function () {
+        tries++;
+        if (aiSlot() || tries > 12) clearInterval(timer);
+      }, 400);
     }
-    var box = aiPanelEl();
-    if (box) box.hidden = false;
+    var box = aiRootEl();
+    if (box) box.classList.add('on');
+  }
+
+  function aiVisible() {
+    var box = aiRootEl();
+    return !!(box && box.classList.contains('on') && box.parentNode);
   }
 
   function aiLogClear() {
@@ -2192,7 +2432,21 @@ async function jobCollect(ctx, target) {
     aiLogAdd(aiAnswer.text, '', true);
     aiLogAdd('проверь перед отправкой · ' + (aiViaText() ? aiViaText() + ' · ' : '') + aiAnswer.model, 'sys');
     var lang = document.getElementById('sgx-ai-lang');
-    if (lang) lang.textContent = langLabel(aiAnswer.lang);
+    if (lang) lang.textContent = langLabel(aiAnswer.lang || '');
+    aiMarkVerifying(false);
+  }
+
+  /* Подпись на кнопке «Спросить ИИ» и в метке языка: пока модель проверяет себя,
+     человек должен видеть, что работа ещё идёт.                                 */
+  function aiMarkVerifying(on) {
+    var lang = document.getElementById('sgx-ai-lang');
+    if (!lang) return;
+    if (on) {
+      lang.textContent = 'проверяю…';
+      lang.classList.add('busy');
+    } else {
+      lang.classList.remove('busy');
+    }
   }
 
   function aiAnswerAt(key) {
@@ -2222,6 +2476,131 @@ async function jobCollect(ctx, target) {
     });
     out.sort(function (a, b) { return (a.section - b.section) || (a.unit - b.unit); });
     return out;
+  }
+
+  /* Какой урок мы сейчас проходим. Нужен, чтобы ИИ понимал уровень: на 4.1 он
+     не должен пушить генераторы, классы и лямбды, если в теории их ещё не было.
+     Номер берём из бокового меню (там он подписан «4.1 Как работают методы»),
+     а если меню свёрнуто — из заголовка страницы.                              */
+  function lessonNow() {
+    var ctx = stepContext();
+    var all = lessonList();
+    var found = null;
+    for (var i = 0; i < all.length; i++) {
+      if (ctx && String(all[i].id) === String(ctx.lesson)) { found = all[i]; break; }
+    }
+    if (found) {
+      return {
+        label: found.label, title: found.title,
+        section: found.section, unit: found.unit,
+        index: all.indexOf(found) + 1, total: all.length
+      };
+    }
+    /* меню не отрисовано: пробуем заголовок страницы и активный пункт меню */
+    var head = $('.lesson__title, .lesson-header__title, h1');
+    var title = head ? norm(head.textContent) : '';
+    var m = /^(\d{1,3})\.(\d{1,3})\s*(.*)$/.exec(title);
+    if (m) {
+      return {
+        label: m[1] + '.' + m[2], title: m[3] || '',
+        section: +m[1], unit: +m[2], index: 0, total: all.length
+      };
+    }
+    var active = $('.lesson-sidebar__item.active, .toc__item.active, li.active a[href*="/lesson/"]');
+    var aTitle = active ? norm(active.textContent) : '';
+    var m2 = /^(\d{1,3})\.(\d{1,3})\s*(.*)$/.exec(aTitle);
+    if (m2) {
+      return {
+        label: m2[1] + '.' + m2[2], title: m2[3] || '',
+        section: +m2[1], unit: +m2[2], index: 0, total: all.length
+      };
+    }
+    return title ? { label: '', title: title, section: 0, unit: 0, index: 0, total: all.length } : null;
+  }
+
+  /* Что в уроке уже проходили. Теория лежит на страницах-лекциях в том же
+     .html-content.rich-text-viewer, только без тестовых данных. Отдаём её модели
+     как «уже известно» — иначе она решает задачу на 4.1 через то, чего в курсе
+     ещё не объясняли, и решение выглядит палевно.
+
+     Загвоздка: спрашивают ИИ на странице ЗАДАНИЯ, а теория — на странице-лекции
+     этого же урока. Поэтому текст лекции запоминаем, пока её читают, и на задании
+     достаём из памяти урока.                                                    */
+  var THEORY_KEY = 'theory';
+  var theoryCache = {};
+  try { theoryCache = JSON.parse(GM_getValue(THEORY_KEY, '{}')) || {}; } catch (e) { theoryCache = {}; }
+
+  function saveTheory() {
+    try { GM_setValue(THEORY_KEY, JSON.stringify(theoryCache)); } catch (e) { /* ignore */ }
+  }
+
+  /* Сколько помним текст лекции: курс проходят за один заход, но старьё чистить
+     надо — иначе хранилище распухнет.                                            */
+  var THEORY_TTL = 12 * 60 * 60 * 1000;
+
+  /* Собираем теорию со страницы и, если она не пустая, запоминаем её для урока.
+     Важная тонкость: на странице ЗАДАНИЯ тот же .html-content.rich-text-viewer
+     содержит условие, а не теорию. Если запомнить его как «пройденный материал»,
+     модель получит условие дважды, а лекцию — ни разу. Поэтому условие отсеиваем. */
+  function rememberTheory() {
+    var ctx = stepContext();
+    if (!ctx) return '';
+    var parts = [];
+    $$('.html-content.rich-text-viewer').forEach(function (n) {
+      var t = norm(n.textContent || '');
+      if (t.length > 20) parts.push(t);
+    });
+    if (!parts.length) {
+      var alt = $('.lesson__theory, .theory-viewer, .step-text__theory');
+      if (alt) {
+        var t2 = norm(alt.textContent || '');
+        if (t2.length > 20) parts.push(t2);
+      }
+    }
+    var text = parts.join('\n').slice(0, 1800);
+    if (!text) return '';
+
+    /* На странице задания тот же контейнер держит условие, а не лекцию: запомнить
+       его как «пройденное» значит отдать модели условие вместо теории. Признак
+       надёжный один — есть ли на шаге само задание. Если есть, ничего не пишем;
+       сравнение с stepConditionText() тут не годится: на странице-лекции он тоже
+       находит текст (и это ровно тот же текст), и проверка всегда срабатывала бы. */
+    if (isTaskPage()) return text;
+
+    var prev = theoryCache[ctx.lesson];
+    if (!prev || prev.text !== text) {
+      theoryCache[ctx.lesson] = { text: text, at: Date.now(), step: ctx.step };
+      saveTheory();
+    }
+    return text;
+  }
+
+  /* Есть ли на шаге задание (редактор кода, варианты или поле ввода) — тогда текст
+     на странице это условие, а не лекция.                                        */
+  function isTaskPage() {
+    if ($('.CodeMirror, .cm-content, .code-runner, #id_coderunner_input')) return true;
+    if ($('.quiz-component input[type="radio"], .quiz-component input[type="checkbox"]')) return true;
+    if ($('.attempt-wrapper__plugin textarea, .quiz-plugin textarea')) return true;
+    if ($('.quiz-plugin__content')) return true;
+    return false;
+  }
+
+  function theoryFor(lessonId) {
+    var rec = theoryCache[lessonId];
+    if (!rec) return '';
+    if (Date.now() - (rec.at || 0) > THEORY_TTL) { delete theoryCache[lessonId]; saveTheory(); return ''; }
+    return rec.text || '';
+  }
+
+  function stepTheoryText() {
+    var ctx = stepContext();
+    var fromPage = rememberTheory();
+    /* То, что лежит на странице задания, — это условие, а не теория: условие
+       уже ушло в запрос отдельно. Поэтому если текст совпал с условием, берём
+       запомненную лекцию урока.                                                 */
+    var cond = stepConditionText();
+    if (fromPage && !(cond && cond.indexOf(fromPage) >= 0)) return fromPage;
+    return ctx ? theoryFor(ctx.lesson) : '';
   }
 
   async function lessonSteps(lessonId) {
@@ -2364,22 +2743,7 @@ async function jobCollect(ctx, target) {
       '<button class="sgx-btn danger" id="sgx-stop" type="button">' + icon('stop', 14) +
       'Остановить</button>',
       '<div class="sgx-progress"><div class="sgx-bar" id="sgx-bar"></div></div>',
-      '<div class="sgx-status" id="sgx-status"></div>',
-      /* Блок ИИ: появляется только после «Спросить ИИ по шагу». Оформлен как
-         родной редактор кода Stepik — вкладка «Код», копирование, сброс, язык.
-         Внутри не поле ввода, а лента сообщений: человек только читает. */
-      '<div class="sgx-ai" id="sgx-ai-panel" hidden>',
-      '<div class="sgx-ai-head">',
-      '<ul class="sgx-ai-tabs"><li class="sgx-ai-tab active">' + icon('code', 14) + 'Ответ</li></ul>',
-      '<div class="sgx-ai-tools">',
-      '<button class="sgx-ai-tool" id="sgx-ai-copy" type="button" title="Скопировать решение">' +
-      icon('copy', 14) + '</button>',
-      '<button class="sgx-ai-tool" id="sgx-ai-reset" type="button" title="Сбросить">' +
-      icon('broom', 14) + '</button>',
-      '<span class="sgx-ai-lang" id="sgx-ai-lang">Python 3.6</span>',
-      '</div></div>',
-      '<div class="sgx-ai-log" id="sgx-ai-log"></div>',
-      '</div>'
+      '<div class="sgx-status" id="sgx-status"></div>'
     ].join('');
 
     panel.querySelector('.sgx-close').addEventListener('click', function () { openPanel(false); });
@@ -2392,23 +2756,90 @@ async function jobCollect(ctx, target) {
       var again = aiAnswer && ctx && aiAnswer.key === ctx.key;
       askAi({ fixed: !!again });
     });
-
-    /* Кнопки блока ИИ — как в родном редакторе Stepik: скопировать решение и
-       сбросить ленту. Печатать здесь нечего, поэтому кроме этих двух действий
-       в блоке ничего не нажимается. */
-    panel.querySelector('#sgx-ai-copy').addEventListener('click', function () {
-      var text = aiAnswerAt(stepContext().key) || (aiAnswer && aiAnswer.text) || '';
-      if (!text) { toast('Копировать нечего — ИИ ещё не отвечал на этом шаге'); return; }
-      copyText(text);
-    });
-    panel.querySelector('#sgx-ai-reset').addEventListener('click', function () {
-      aiLogClear();
-      aiShow(false);
-    });
     /* Вставляем сразу в боковое меню (или в body, если меню ещё не отрисовано):
        без appendChild элемент не попадает в документ, и getElementById его не найдёт. */
     var host = $('.lesson-sidebar__content') || document.body;
     host.appendChild(panel);
+  }
+
+  /* --- блок ИИ: отдельный элемент, живёт в карточке задания ---
+     Раньше он был частью панели настроек в боковом меню. Это неправильное место:
+     решение — это код, а код на Stepik живёт в редакторе. Поэтому блок стоит
+     прямо под редактором, в области .quiz-plugin, и выглядит как его продолжение:
+     вкладка «Код», копирование, сброс и метка языка.                            */
+  function ensureAiRoot() {
+    if (document.getElementById('sgx-ai-root')) return document.getElementById('sgx-ai-root');
+    var root = document.createElement('div');
+    root.id = 'sgx-ai-root';
+    root.setAttribute('data-sgx-ai', '1');
+    root.innerHTML = [
+      '<div id="sgx-ai-panel">',
+      '<div class="sgx-ai-head">',
+      '<ul class="sgx-ai-tabs"><li class="sgx-ai-tab active">' + icon('code', 14) + 'Код</li></ul>',
+      '<div class="sgx-ai-tools">',
+      '<button class="sgx-ai-tool" id="sgx-ai-copy" type="button" title="Скопировать решение">' +
+      icon('copy', 14) + '</button>',
+      '<button class="sgx-ai-tool" id="sgx-ai-reset" type="button" title="Сбросить">' +
+      icon('broom', 14) + '</button>',
+      '<span class="sgx-ai-lang" id="sgx-ai-lang">ИИ</span>',
+      '</div></div>',
+      '<div class="sgx-ai-log" id="sgx-ai-log"></div>',
+      '</div>'
+    ].join('');
+
+    /* Кнопки блока — как в родном редакторе Stepik: скопировать решение и сбросить
+       ленту. Печатать здесь нечего, поэтому кроме этих двух действий в блоке
+       ничего не нажимается.                                                      */
+    root.querySelector('#sgx-ai-copy').addEventListener('click', function () {
+      var ctx = stepContext();
+      var text = (ctx && aiAnswerAt(ctx.key)) || (aiAnswer && aiAnswer.text) || '';
+      if (!text) { toast('Копировать нечего — ИИ ещё не отвечал на этом шаге'); return; }
+      copyText(text);
+    });
+    root.querySelector('#sgx-ai-reset').addEventListener('click', function () {
+      aiLogClear();
+      aiShow(false);
+    });
+    return root;
+  }
+
+  /* Куда класть блок ИИ. Ищем место внутри карточки задания, вплотную к редактору
+     кода — ровно там, где человек и ждёт решение. Порядок важен: сначала якоря
+     вокруг .code-editor-quiz__editor, потом общий контейнер плагина.           */
+  var AI_HOST_SELS = [
+    '.code-editor-quiz__editor',      /* сам редактор кода в текущей вёрстке */
+    '.code-quiz__code',
+    '.quiz-plugin__content',          /* общий контейнер плагина */
+    '.quiz-plugin',
+    '.attempt-wrapper__content'
+  ];
+
+  /* Якорь ставим ПОСЛЕ редактора, чтобы блок не отодвинул поле ввода, а лёг под ним.
+     Если редактора ещё нет (задание с выбором) — в конец контейнера карточки.    */
+  function aiHost() {
+    for (var i = 0; i < AI_HOST_SELS.length; i++) {
+      var node = $(AI_HOST_SELS[i]);
+      if (!node) continue;
+      /* контейнер должен быть видимым: свёрнутая карточка ничего не покажет */
+      var r = node.getBoundingClientRect();
+      if (r.width > 120) return node;
+    }
+    return null;
+  }
+
+  function aiSlot() {
+    var root = ensureAiRoot();
+    var host = aiHost();
+    if (!host) return null;
+    /* ставим сразу после редактора, а не в самый конец: так блок читается как
+       часть редактора. Если редактор — сам контейнер, кладём внутрь, в конец.  */
+    var cm = $('.CodeMirror') || $('.cm-editor') || $('.code-editor-quiz__editor');
+    if (cm && host.contains(cm) && cm.parentNode) {
+      if (root.previousSibling !== cm) cm.parentNode.insertBefore(root, cm.nextSibling);
+    } else if (root.parentNode !== host) {
+      host.appendChild(root);
+    }
+    return root;
   }
 
   /* куда класть панель: в наш блок внутри прокручиваемой области меню курса */
@@ -2612,9 +3043,19 @@ async function jobCollect(ctx, target) {
        переставлять заново, иначе они исчезают после смены шага. */
     syncToolsButton();
     if (panelOpen()) sidebarSlot();
+    /* Блок ИИ перерисовывается вместе с карточкой задания — возвращаем его на
+       место под редактором, иначе он пропадает при смене шага.                 */
+    if (aiRootEl() && aiRootEl().classList.contains('on')) aiSlot();
 
     var ctx = stepContext();
     if (!ctx) { hideChip(); currentKey = null; return; }
+    /* Пока человек читает лекцию, запоминаем её текст: на странице задания
+       ИИ должен знать, что в этом уроке уже объяснили. Ошибку глотаем — это
+       подстраховка, а не основная работа.                                       */
+    if (Date.now() - lastTheoryAt > 3000) {
+      lastTheoryAt = Date.now();
+      try { rememberTheory(); } catch (e) { /* ignore */ }
+    }
     if (ctx.key !== currentKey) {
       currentKey = ctx.key;
       hideChip();
@@ -2862,7 +3303,10 @@ async function jobCollect(ctx, target) {
 
     GM_registerMenuCommand('📋 Показать решение от ИИ', function () {
       if (!aiAnswer || !aiAnswer.text) { toast('ИИ ещё ничего не присылал на этом шаге'); return; }
-      if (!openPanel(true)) return;
+      /* Блок ИИ живёт в карточке задания, а не в боковом меню, поэтому показываем
+         его независимо от того, открылась ли панель настроек: раньше отказ
+         openPanel() уносил с собой и решение.                                   */
+      openPanel(true, true);
       aiShow(true);
       aiLogClear();
       aiLogAdd('шаг ' + (aiAnswer.key || stepContext().key || ''), 'sys');
