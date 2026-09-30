@@ -139,6 +139,11 @@ function makeFetch(state) {
       if (state.aiProxyError) {
         return ok({ error: { message: state.aiProxyError.message }, status: state.aiProxyError.status }, 'json');
       }
+      /* Закрытое развёртывание Apps Script отдаёт страницу входа вместо JSON —
+         на этом спотыкаются все, кто впервые его настраивает. */
+      if (state.aiProxyHtml) {
+        return ok('<html><head><title>Sign in</title></head><body>Войдите в аккаунт Google</body></html>', 'text');
+      }
       const finish = state.aiFinishReason || (state.aiTruncated ? 'length' : 'stop');
       return ok({ choices: [{ message: msg, finish_reason: finish }], model: model, __asked: asked }, 'json');
     }
@@ -164,7 +169,7 @@ function makeFetch(state) {
   };
 }
 
-function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiPaidDown, aiPaidText, aiPaidEmpty, aiKey, aiPaidQueue, checkHint, checkHintAt, cmMode, seedTheory, aiTruncated, aiModel, aiFinishReason, aiDelay, aiProxy, aiProxyError }) {
+function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiPaidDown, aiPaidText, aiPaidEmpty, aiKey, aiPaidQueue, checkHint, checkHintAt, cmMode, seedTheory, aiTruncated, aiModel, aiFinishReason, aiDelay, aiProxy, aiProxyError, aiProxyHtml }) {
   return new Promise((resolve, reject) => {
     const dom = new JSDOM(html, { url, runScripts: 'dangerously', pretendToBeVisual: true });
     const { window } = dom;
@@ -178,6 +183,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       aiTruncated: !!aiTruncated, aiFinishReason: aiFinishReason || '',
       aiDelay: aiDelay || 0,
       aiProxyError: aiProxyError || null,
+      aiProxyHtml: !!aiProxyHtml,
       cmMode: cmMode || '', css: '',
       storage: { writeToken: token === undefined ? 'github_pat_11TEST' : token }
     };
@@ -3641,6 +3647,23 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
         !/пустой ответ/.test(status), status);
       check('сказано про лимит', /лимит|429/i.test(status + aiFeedText(win, st)),
         status + ' | ' + aiFeedText(win, st).slice(0, 80));
+    }
+  });
+
+  console.log('\n=== 83b. прокси вернул страницу входа вместо JSON ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 12000, cmMode: 'text/x-python',
+    aiProxy: 'https://script.google.com/macros/s/TEST/exec',
+    aiProxyHtml: true,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 8000));
+      const status = statusText(win);
+      check('сказано, что прокси ответил не JSON', /не JSON/.test(status), status);
+      check('и что проверить доступ к развёртыванию', /для всех/.test(status), status);
+      check('ошибка не выглядит как «пустой ответ модели»',
+        !/пустой ответ/.test(status), status);
     }
   });
 

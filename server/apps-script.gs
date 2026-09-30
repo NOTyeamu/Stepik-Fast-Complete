@@ -12,6 +12,8 @@
  *   POST {items:[...]}   → сохранить/обновить ответы (пачкой, по ключу)
  *   POST {ai:{...}}      → НЕОБЯЗАТЕЛЬНО: прокси для ИИ, ключ лежит в свойствах
  *                          скрипта и в браузер не попадает (см. ниже)
+ *   GET  ?ai=1           → проверка прокси: задан ли ключ, сколько запросов
+ *                          ушло за сутки, какой суточный предел
  *
  * Формат записи: {key:"l1793281_s8", lesson:"1793281", step:8, kind:"code",
  *                 ext:"cs", content:"...", author:"Имя на Stepik"}
@@ -73,6 +75,24 @@ function rows() {
 function doGet(e) {
   var p = (e && e.parameter) || {};
   try {
+    /* Открой адрес веб-приложения с ?ai=1 в браузере — сразу видно, всё ли
+       настроено: задан ли ключ, сколько запросов ушло за сутки, какой предел.
+       Сам ключ не показываем никогда. */
+    if (p.ai === '1') {
+      var props = PropertiesService.getScriptProperties();
+      var q = aiQuota(false);
+      return json({
+        ok: true,
+        ai: !!props.getProperty('AI_KEY'),
+        endpointSet: !!props.getProperty('AI_ENDPOINT'),
+        usedToday: q.used,
+        dailyLimit: q.limit,
+        day: q.day,
+        hint: props.getProperty('AI_KEY')
+          ? 'всё готово: впиши этот адрес в скрипт — Tampermonkey, «🌐 Прокси ИИ»'
+          : 'не хватает свойства AI_KEY: Настройки проекта → Свойства скрипта'
+      });
+    }
     var all = rows();
     if (p.key) {
       for (var i = 0; i < all.length; i++) {
@@ -121,6 +141,35 @@ function doGet(e) {
  * --------------------------------------------------------------------------- */
 
 var AI_DEFAULT_ENDPOINT = 'https://api.reformboss.com/v1/chat/completions';
+var AI_DEFAULT_LIMIT = 300;   // запросов в сутки, если свой предел не задан
+
+/* Суточный счётчик запросов.
+ *
+ * Зачем: адрес прокси лежит в скрипте, а скрипт публичный — значит через прокси
+ * может ходить кто угодно. Ключ при этом не утекает, но кредиты тратятся. Лимит
+ * делает расход предсказуемым: даже если адрес разойдётся по людям, больше
+ * заданного числа запросов в сутки через прокси не пройдёт.
+ *
+ * Считаем под блокировкой: запросы могут идти одновременно, и без неё часть
+ * обращений не попала бы в счётчик. */
+function aiQuota(bump) {
+  var props = PropertiesService.getScriptProperties();
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (e) { /* без блокировки тоже сойдёт */ }
+  try {
+    var today = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
+    var day = props.getProperty('AI_DAY') || '';
+    var used = day === today ? Number(props.getProperty('AI_USED') || 0) : 0;
+    var limit = Number(props.getProperty('AI_DAILY_LIMIT') || AI_DEFAULT_LIMIT);
+    if (bump) {
+      used++;
+      props.setProperties({ AI_DAY: today, AI_USED: String(used) });
+    }
+    return { day: today, used: used, limit: limit };
+  } finally {
+    lock.releaseLock();
+  }
+}
 
 function aiProxy(body) {
   var props = PropertiesService.getScriptProperties();
@@ -128,6 +177,14 @@ function aiProxy(body) {
   if (!key) {
     return { status: 500, text: '{"error":{"message":"AI_KEY не задан в свойствах скрипта"}}' };
   }
+  var q = aiQuota(false);
+  if (q.used >= q.limit) {
+    return { status: 429, text: JSON.stringify({
+      error: { message: 'суточный лимит прокси исчерпан (' + q.limit + ' запросов)' },
+      status: 429
+    }) };
+  }
+
   var endpoint = props.getProperty('AI_ENDPOINT') || AI_DEFAULT_ENDPOINT;
   var payload = {
     model: body.model,
@@ -142,7 +199,9 @@ function aiProxy(body) {
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   });
-  return { status: res.getResponseCode(), text: res.getContentText() };
+  var code = res.getResponseCode();
+  if (code === 200) aiQuota(true);      // в счётчик идут только удачные запросы
+  return { status: code, text: res.getContentText() };
 }
 
 function doPost(e) {
