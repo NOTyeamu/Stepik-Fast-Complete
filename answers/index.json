@@ -769,6 +769,11 @@
   "ext": "json",
   "kind": "choice"
  },
+ "l1812981_s3": {
+  "file": "l1812981_s3.json",
+  "ext": "json",
+  "kind": "choice"
+ },
  "l1812981_s8": {
   "file": "l1812981_s8.py",
   "ext": "py",
