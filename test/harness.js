@@ -792,6 +792,84 @@ const CHOICE_ONLY_HTML = `<!doctype html><html><body>
   </div></div>
 </body></html>`;
 
+/* Тест с выбором, где проверка НЕ принимает ответ: по нажатию «Отправить»
+   появляется шапка результата с «Пока неправильно, попробуйте еще раз!» —
+   именно её присылал человек. Раньше этот текст не считался ошибкой, и правки
+   не было. */
+const CHOICE_FAIL_HTML = `<!doctype html><html><body>
+  ${SHELL_HTML}
+  <div class="attempt-wrapper choice"><div class="attempt-wrapper__content">
+    <div class="step-inner page-fragment">
+      <div class="html-content rich-text-viewer"><span><p>Что из перечисленного соответствует методу, который принимает два числа и возвращает их произведение?</p></span></div>
+    </div>
+    <div class="quiz-plugin"><div class="quiz-plugin__content">
+      <div class="quiz-component" data-type="choice-quiz">
+        <label class="s-radio"><input class="s-radio__input" type="radio" name="q" value="201">
+          <span class="s-radio__label choice-quiz-show__option">static int Multiply()</span></label>
+        <label class="s-radio"><input class="s-radio__input" type="radio" name="q" value="202">
+          <span class="s-radio__label choice-quiz-show__option">static void Multiply(int a, int b)</span></label>
+        <label class="s-radio"><input class="s-radio__input" type="radio" name="q" value="203">
+          <span class="s-radio__label choice-quiz-show__option">void static Multiply(int, int)</span></label>
+        <label class="s-radio"><input class="s-radio__input" type="radio" name="q" value="204">
+          <span class="s-radio__label choice-quiz-show__option">static int Multiply(int a, int b)</span></label>
+      </div>
+    </div></div>
+    <div class="attempt-wrapper-buttons">
+      <button class="attempt-wrapper-button submit" type="button">Отправить на проверку</button>
+    </div>
+  </div></div>
+  <script>
+    document.querySelector('.attempt-wrapper__content').addEventListener('click', function (e) {
+      var t = e.target.closest && e.target.closest('button');
+      if (!t || !t.classList.contains('submit')) return;
+      if (document.querySelector('.submission-show__header')) return;
+      document.querySelector('.attempt-wrapper__content').insertAdjacentHTML('afterbegin',
+        '<div class="submission-show__header"><div class="submission-show__title">' +
+        '<div class="submission-show__title-content">Пока неправильно, попробуйте еще раз!</div>' +
+        '</div></div>');
+    });
+  </script>
+</body></html>`;
+
+/* Тест с НЕСКОЛЬКИМИ ответами: поля checkbox, а не radio. По типу поля скрипт
+   понимает, рисовать в чате кружок или квадрат. */
+const CHOICE_CHECK_HTML = `<!doctype html><html><body>
+  ${SHELL_HTML}
+  <div class="attempt-wrapper choice"><div class="attempt-wrapper__content">
+    <div class="step-inner page-fragment">
+      <div class="html-content rich-text-viewer"><span><p>Выберите все верные утверждения.</p></span></div>
+    </div>
+    <div class="quiz-plugin"><div class="quiz-plugin__content">
+      <div class="quiz-component" data-type="choice-quiz">
+        <label class="s-checkbox"><input class="s-checkbox__input" type="checkbox" name="q" value="301">
+          <span class="s-checkbox__label choice-quiz-show__option">первый</span></label>
+        <label class="s-checkbox"><input class="s-checkbox__input" type="checkbox" name="q" value="302">
+          <span class="s-checkbox__label choice-quiz-show__option">второй</span></label>
+        <label class="s-checkbox"><input class="s-checkbox__input" type="checkbox" name="q" value="303">
+          <span class="s-checkbox__label choice-quiz-show__option">третий</span></label>
+      </div>
+    </div></div>
+  </div></div>
+</body></html>`;
+
+/* Задание со свободным ответом: обычное поле, а не редактор кода. Разметку
+   прислал человек — класс string-quiz__textarea. */
+const TEXT_QUIZ_HTML = `<!doctype html><html><body>
+  ${SHELL_HTML}
+  <div class="attempt-wrapper string"><div class="attempt-wrapper__content">
+    <div class="step-inner page-fragment">
+      <div class="html-content rich-text-viewer"><span><p>Какой тип данных должен быть у метода, который возвращает значение True или False?</p></span></div>
+    </div>
+    <div class="quiz-plugin"><div class="quiz-plugin__content">
+      <textarea spellcheck="false" required placeholder="Напишите ваш ответ здесь..."
+        class="ember-text-area ember-view textarea string-quiz__textarea"></textarea>
+    </div></div>
+    <div class="attempt-wrapper-buttons">
+      <button class="attempt-wrapper-button submit" type="button">Отправить на проверку</button>
+    </div>
+  </div></div>
+</body></html>`;
+
 /* Страница-лекция: никакого задания нет, только теория. Её текст скрипт должен
    запомнить для урока — чтобы потом на задании ИИ не лез в непройденное. */
 const THEORY_ONLY_HTML = `<!doctype html><html><body>
@@ -2673,9 +2751,13 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
 
       reset.click();
       await new Promise((r) => setTimeout(r, 300));
-      check('нажатие сброса прячет блок',
-        !win.document.querySelector('#sgx-ai-root.on'), 'блок остался видимым');
+      /* Раньше сброс прятал блок, и вернуть его было нечем. Теперь он чистит
+         переписку и остаётся на экране.                                        */
+      check('нажатие сброса НЕ прячет блок',
+        !!win.document.querySelector('#sgx-ai-root.on'), 'блок исчез');
       check('лента очищена', !/n % 2 == 0/.test(aiFeedText(win, st)), 'текст остался');
+      check('предложено начать заново', /заново/i.test(aiFeedText(win, st)),
+        aiFeedText(win, st).slice(0, 80));
     }
   });
 
@@ -3140,6 +3222,186 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
         !/n % 2 == 0/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 120));
       check('и в редактор он тоже не попал',
         !/n % 2 == 0/.test(st.setValue || ''), JSON.stringify((st.setValue || '').slice(0, 60)));
+    }
+  });
+
+  /* --- 74. скобка рисуется один раз, надпись — вместе с ней --------------- */
+  console.log('\n=== 74. скобка рисуется один раз, а не бесконечно ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: { l1793281_s8: { file: 'l1793281_s8.cs', ext: 'cs', kind: 'code', content: 'int x = 1;' } },
+    submissions: [], html: HTML, waitMs: 4000, innerWidth: 1400,
+    afterRun: async (win, st) => {
+      const chip = win.document.querySelector('#sgx-chip');
+      check('скобка показана', chip && chip.classList.contains('on'));
+      check('отмечено, что нарисована', chip && chip.getAttribute('data-drawn') === '1',
+        chip ? String(chip.getAttribute('data-drawn')) : '—');
+      check('надпись появляется вместе со скобкой — есть класс появления',
+        chip && chip.classList.contains('sgx-in'), chip ? chip.className : '—');
+      /* tick зовёт showChip каждые 1.5 с: за 4 секунды это минимум дважды */
+      const css = st.css || '';
+      check('у надписи есть появление, а не мгновенный показ',
+        /#sgx-chip\.sgx-in \.sgx-body\{/.test(css), 'правила нет');
+    }
+  });
+
+  /* --- 75. сброс не закрывает блок ---------------------------------------- */
+  console.log('\n=== 75. «Сбросить» чистит ленту, но блок не закрывает ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 12000, cmMode: 'text/x-python',
+    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+      check('решение в ленте есть', /n % 2 == 0/.test(aiFeedText(win, st)),
+        aiFeedText(win, st).slice(0, 60));
+
+      const reset = win.document.querySelector('#sgx-ai-reset');
+      reset.click();
+      await new Promise((r) => setTimeout(r, 500));
+
+      const root = win.document.querySelector('#sgx-ai-root');
+      check('блок остался на экране', !!root && root.classList.contains('on'),
+        root ? root.className : 'нет блока');
+      check('лента очищена', !/n % 2 == 0/.test(aiFeedText(win, st)),
+        aiFeedText(win, st).slice(0, 60));
+      check('сказано, что можно начать заново', /заново/i.test(aiFeedText(win, st)),
+        aiFeedText(win, st).slice(0, 80));
+    }
+  });
+
+  /* --- 76. провал теста с выбором → другой вариант ------------------------ */
+  console.log('\n=== 76. «Пока неправильно» распознаётся, и просим ДРУГОЙ вариант ===');
+  {
+    const probe = probeSandbox(CHOICE_FAIL_HTML, ['looksLikeCheckError', 'stepErrorText'],
+      `https://stepik.org/lesson/${LESSON}/step/2`);
+    const bad = probe.looksLikeCheckError('Пока неправильно, попробуйте еще раз!');
+    const good = probe.looksLikeCheckError('Верно! Молодец, всё правильно');
+    probe.close();
+    check('«Пока неправильно» — это ошибка проверки', bad, 'не распознано');
+    check('«Верно» ошибкой не считается', !good, 'ложное срабатывание');
+  }
+
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/2?unit=1818966`,
+    store: {}, submissions: [], html: CHOICE_FAIL_HTML, waitMs: 20000,
+    aiPaidQueue: [
+      'static void Multiply(int a, int b)',
+      'static int Multiply(int a, int b)'
+    ],
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+      const inputs = Array.from(win.document.querySelectorAll('.quiz-component input[type=radio]'));
+      check('первый вариант отмечен', inputs.filter((i) => i.checked).length === 1,
+        'отмечено: ' + inputs.filter((i) => i.checked).length);
+
+      const sub = win.document.querySelector('button.submit');
+      if (sub) sub.click();
+      await new Promise((r) => setTimeout(r, 9000));
+
+      check('отчёт проверки прочитан из шапки',
+        /Пока неправильно/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 120));
+      check('сделана вторая попытка у ИИ', st.aiPaidCalls.length >= 2,
+        'запросов: ' + st.aiPaidCalls.length);
+      const last = st.aiPaidCalls[st.aiPaidCalls.length - 1];
+      const asked = last ? last.body : '';
+      check('модели сказано, что первый вариант уже не подошёл',
+        /Уже отправляли/.test(asked) && /static void Multiply\(int a, int b\)/.test(asked),
+        'прошлой попытки в запросе нет');
+      check('модели сказано выбрать другой вариант', /Выбери ДРУГОЙ/.test(asked),
+        'нет требования выбрать другой');
+      check('отмечен уже другой вариант',
+        !!(inputs[3] && inputs[3].checked), 'второй вариант не отмечен');
+    }
+  });
+
+  /* --- 77. варианты в чате: круг или квадрат ------------------------------ */
+  console.log('\n=== 77. варианты ответа показаны в чате с метками ===');
+  {
+    const probe = probeSandbox(CHOICE_ONLY_HTML,
+      ['choiceMultiple', 'aiLogChoice', 'ensureAiRoot', 'aiSlot', 'aiLogEl'],
+      `https://stepik.org/lesson/${LESSON}/step/2`);
+    probe.ensureAiRoot();
+    probe.aiSlot();
+    const one = probe.choiceMultiple();
+    probe.aiLogChoice({ ids: ['104'], answers: ['static int Multiply(int a, int b)'] });
+    const doc = probe.window.document;
+    const marks = Array.from(doc.querySelectorAll('#sgx-ai-log .sgx-ai-mark'));
+    const on = Array.from(doc.querySelectorAll('#sgx-ai-log .sgx-ai-opt.on'));
+    const note = doc.querySelector('#sgx-ai-log .sgx-ai-optnote');
+    probe.close();
+    check('один ответ — кружки, а не квадраты', !one, 'тип определён как «несколько»');
+    check('все варианты попали в ленту', marks.length === 4, 'меток: ' + marks.length);
+    check('метка круглая', marks.length > 0 && /circle/.test(marks[0].className),
+      marks.length ? marks[0].className : '—');
+    check('закрашен ровно один вариант', on.length === 1, 'закрашено: ' + on.length);
+    check('закрашен именно выбранный',
+      on.length === 1 && /static int Multiply\(int a, int b\)/.test(on[0].textContent),
+      on.length ? on[0].textContent : '—');
+    check('подписано, что ответ один', !!note && /один ответ/i.test(note.textContent),
+      note ? note.textContent : '—');
+  }
+
+  console.log('\n=== 77a. несколько ответов — квадраты ===');
+  {
+    const probe = probeSandbox(CHOICE_CHECK_HTML,
+      ['choiceMultiple', 'aiLogChoice', 'ensureAiRoot', 'aiSlot'],
+      `https://stepik.org/lesson/${LESSON}/step/2`);
+    probe.ensureAiRoot();
+    probe.aiSlot();
+    const many = probe.choiceMultiple();
+    probe.aiLogChoice({ ids: ['301', '302'], answers: ['первый', 'второй'] });
+    const doc = probe.window.document;
+    const marks = Array.from(doc.querySelectorAll('#sgx-ai-log .sgx-ai-mark'));
+    const on = Array.from(doc.querySelectorAll('#sgx-ai-log .sgx-ai-opt.on'));
+    const note = doc.querySelector('#sgx-ai-log .sgx-ai-optnote');
+    probe.close();
+    check('несколько ответов распознаны', many, 'тип определён как «один»');
+    check('метка квадратная', marks.length > 0 && /box/.test(marks[0].className),
+      marks.length ? marks[0].className : '—');
+    check('закрашено два варианта', on.length === 2, 'закрашено: ' + on.length);
+    check('подписано, что ответов несколько', !!note && /несколько/i.test(note.textContent),
+      note ? note.textContent : '—');
+  }
+
+  /* --- 78. свободный ответ в поле ----------------------------------------- */
+  console.log('\n=== 78. задание со свободным ответом в поле ===');
+  {
+    const probe = probeSandbox(TEXT_QUIZ_HTML,
+      ['stepKindNow', 'aiSystem', 'insertTarget', 'choiceMultiple'],
+      `https://stepik.org/lesson/${LESSON}/step/4`);
+    const kind = probe.stepKindNow();
+    const sys = probe.aiSystem('text');
+    const t = probe.insertTarget();
+    probe.close();
+    check('вид задания определён как свободный ответ', kind === 'text', kind);
+    check('системный текст говорит, что это не код', /НЕ код/.test(sys), sys.slice(0, 60));
+    check('поле ответа найдено', !!t && /string-quiz__textarea/.test(t.el.className),
+      t ? t.el.className : '—');
+    check('скобка обрамляет само поле, а не весь блок',
+      !!t && t.anchor === t.el, t ? t.anchor.className : '—');
+  }
+
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/4?unit=1818966`,
+    store: {}, submissions: [], html: TEXT_QUIZ_HTML, waitMs: 10000,
+    aiPaidText: 'bool',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 5000));
+      const area = win.document.querySelector('.string-quiz__textarea');
+      check('ответ записан в поле', !!area && area.value.trim() === 'bool',
+        area ? JSON.stringify(area.value) : 'поля нет');
+      check('«Запустить код» для такого задания не ищем',
+        !/Кнопку «Запустить код»/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 120));
+      check('в ленте сказано про поле, а не про редактор',
+        /Записал ответ в поле/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 120));
+      const name = Object.keys(st.inbox)[0] || '';
+      check('ответ сохранён с расширением .txt', /\.txt$/.test(name), name || 'ничего не ушло');
+      check('и в хранилище именно ответ', (st.inbox[name] || '').trim() === 'bool',
+        JSON.stringify(st.inbox[name] || ''));
     }
   });
 

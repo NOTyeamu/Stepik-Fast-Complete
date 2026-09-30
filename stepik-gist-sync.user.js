@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.10.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам — отмечает нужный вариант. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
+// @version      6.11.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам: показывает варианты в чате кружками или квадратами, отмечает нужные, а при отказе проверки берёт другой вариант. Задания со свободным ответом в поле тоже решаются. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
@@ -64,7 +64,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.10.0';
+  var VERSION = '6.11.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -444,6 +444,14 @@
         content: JSON.stringify({ type: 'choice', ids: ids, answers: choiceTexts(ids) }, null, 2)
       };
     }
+    /* Свободный ответ в обычном поле: у такого задания ответ лежит в reply.text,
+       а не в reply.code — без этой ветки он не сохранялся бы вовсе.            */
+    if (typeof reply.text === 'string' && reply.text.trim()) {
+      return {
+        kind: 'text', correct: true, via: via, ext: 'txt',
+        lang: '', content: reply.text.trim()
+      };
+    }
     return null;
   }
 
@@ -644,8 +652,8 @@
         } catch (e) { /* ниже */ }
       }
     }
-    var field = $('.attempt-wrapper__plugin textarea') || $('.quiz-component textarea') ||
-      $('.attempt-wrapper__plugin input[type="text"]');
+    var field = $('.string-quiz__textarea') || $('.attempt-wrapper__plugin textarea') ||
+      $('.quiz-component textarea') || $('.attempt-wrapper__plugin input[type="text"]');
     if (field) { setNative(field, text); return { ok: true, via: 'поле ввода' }; }
     return { ok: false, error: 'редактор для вставки не найден' };
   }
@@ -716,7 +724,8 @@
       if (c6 && c6.getBoundingClientRect().height) el = c6.closest('.cm-editor') || c6;
     }
     if (!el) {
-      var field = $('.attempt-wrapper__plugin textarea, .quiz-component textarea');
+      var field = $('.string-quiz__textarea') ||
+        $('.attempt-wrapper__plugin textarea, .quiz-component textarea');
       if (field) el = field;
     }
     if (!el) return null;
@@ -728,7 +737,7 @@
      поэтому в рамку он не попадает.                                            */
   var TIGHT_SELS = [
     '.CodeMirror', '.cm-editor', '.code-editor-quiz__editor', '.code-quiz__code',
-    '.code-editor', '.quiz-component'
+    '.code-editor', '.string-quiz__textarea', '.quiz-component'
   ];
 
   function tightBlockOf(el) {
@@ -825,7 +834,11 @@
     '#sgx-chip .sgx-brace{flex:none;display:block;overflow:visible}',
     '#sgx-chip.above .sgx-brace{display:none}',
     '#sgx-chip .sgx-body{display:flex;flex-direction:column;justify-content:center;gap:6px;',
-    'padding:8px 10px;pointer-events:auto;background:transparent;border:0;border-radius:0}',
+    'padding:8px 10px;pointer-events:auto;background:transparent;border:0;border-radius:0;',
+    /* надпись появляется вместе со скобкой, а не возникает до неё */
+    'opacity:0;transform:translateX(-6px);',
+    'transition:opacity .3s ease .18s,transform .3s ease .18s}',
+    '#sgx-chip.sgx-in .sgx-body{opacity:1;transform:none}',
     '#sgx-chip .sgx-label{color:#1F1D1B;font-weight:700;font-size:15px}',
     '#sgx-chip .sgx-acts{display:flex;align-items:center;gap:8px}',
     '#sgx-chip .sgx-sep{color:#B9B7B2}',
@@ -957,6 +970,21 @@
     '#sgx-ai-panel .sgx-ai-repline.bad{color:#B3261E;font-weight:600}',
     '#sgx-ai-panel .sgx-ai-repline.ok{color:#2C6B3C}',
     '#sgx-ai-panel .sgx-ai-repline.note{color:#6B6A67}',
+    /* варианты теста в чате: круг — один ответ, квадрат — несколько */
+    '#sgx-ai-panel .sgx-ai-opts{display:flex;flex-direction:column;gap:6px;padding:2px 0}',
+    '#sgx-ai-panel .sgx-ai-opt{display:flex;align-items:flex-start;gap:var(--sgx-s2);',
+    'font-size:var(--sgx-f-sm);color:#4B4A47}',
+    '#sgx-ai-panel .sgx-ai-mark{flex:0 0 auto;position:relative;width:16px;height:16px;margin-top:2px;',
+    'border:2px solid #B9B7B2;background:#fff}',
+    '#sgx-ai-panel .sgx-ai-mark.circle{border-radius:50%}',
+    '#sgx-ai-panel .sgx-ai-mark.box{border-radius:3px}',
+    '#sgx-ai-panel .sgx-ai-opt.on{color:#1F1D1B;font-weight:600}',
+    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark{border-color:#2F7CE0}',
+    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.circle::after{content:"";position:absolute;inset:2px;',
+    'border-radius:50%;background:#2F7CE0}',
+    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.box::after{content:"";position:absolute;inset:2px;',
+    'border-radius:1px;background:#2F7CE0}',
+    '#sgx-ai-panel .sgx-ai-optnote{margin-top:2px;font-size:var(--sgx-f-xs);color:var(--sgx-fg-dim)}',
     /* --- выбор модели: свой список, а не родной select ---
        Родной <select> в списке значков не покажет, а человек просил значок модели
        слева и «ум» справа. Поэтому это кнопка + всплывающий список.            */
@@ -1229,14 +1257,28 @@
     chip.querySelector('.sgx-label').textContent = label || 'есть решение';
     chip.classList.toggle('sgx-no-answer', !!noAnswer);
     chipAnchor = target;
-    /* каждый показ рисуем скобку заново */
-    chip.removeAttribute('data-drawn');
+    /* Рисуем скобку ТОЛЬКО при появлении. tick зовёт showChip каждые 1.5 секунды,
+       и если сбрасывать отметку каждый раз, скобка обводится бесконечно — на это
+       и жаловался человек.                                                    */
+    var fresh = !chip.classList.contains('on');
+    if (fresh) {
+      chip.removeAttribute('data-drawn');
+      chip.classList.remove('sgx-in');
+    }
     chip.classList.add('on');
     positionChip(target);
+    if (fresh) {
+      /* пересчёт нужен, чтобы браузер не склеил появление и анимацию */
+      void chip.offsetWidth;
+      chip.classList.add('sgx-in');
+    }
   }
 
   function hideChip(dismiss) {
-    if (chip) chip.classList.remove('on');
+    if (chip) {
+      chip.classList.remove('on');
+      chip.classList.remove('sgx-in');
+    }
     /* ужимание снимаем: страница должна вернуться к обычной ширине */
     squeezeRight(null, 0);
     chipAnchor = null;
@@ -2407,10 +2449,15 @@ async function jobCollect(ctx, target) {
     return '';
   }
 
-  /* Задание бывает и «ответить галочкой»: тогда просим прислать вариант текстом. */
+  /* Видов задания три:
+       code   — редактор кода;
+       choice — тест с галочками (один ответ или несколько);
+       text   — свободный ответ в обычном поле (string-quiz__textarea).          */
   function stepKindNow() {
-    if ($('.CodeMirror, .cm-content, .attempt-wrapper__plugin textarea')) return 'code';
+    if ($('.CodeMirror, .cm-content')) return 'code';
+    if ($('.string-quiz__textarea')) return 'text';
     if ($('.quiz-component input[type="radio"], .quiz-component input[type="checkbox"]')) return 'choice';
+    if ($('.attempt-wrapper__plugin textarea')) return 'code';
     return 'text';
   }
 
@@ -2441,6 +2488,12 @@ async function jobCollect(ctx, target) {
      Для теста с выбором нужен ДРУГОЙ текст: правила про stdin/stdout и «код целиком»
      сбивали модель с толку, и она писала код там, где надо поставить галочку.     */
   function aiSystem(kind) {
+    if (kind === 'text') {
+      return 'Реши задание со Stepik. Это НЕ код, а короткий ответ — верни ТОЛЬКО его: ' +
+        'одну строку, без пояснений, без markdown, без кавычек и без точки в конце.\n' +
+        '1. Отвечай ровно на вопрос и тем же языком, что и вопрос.\n' +
+        '2. Пиши так, как ответил бы студент этого урока: коротко и по делу.';
+    }
     if (kind === 'choice') {
       return 'Реши тест со Stepik. Верни ТОЛЬКО текст выбранного варианта — ровно так, ' +
         'как он написан в списке, символ в символ, без пояснений, без markdown и без ' +
@@ -2507,12 +2560,29 @@ async function jobCollect(ctx, target) {
         'ровно как в списке, без номера и без пояснений.';
       var base = aiLessonBlock() + '\n' + ask + '\n\nВопрос:\n' + task;
       if (list) base += '\n\nВарианты ответа:\n' + list;
+      /* Прошлые попытки: без этого модель упрямо возвращает тот же вариант, и
+         человек получает «Пока неправильно» второй раз подряд.                 */
+      var tried = aiTriedChoices[ctx && ctx.key] || [];
+      if (tried.length) {
+        base += '\n\nУже отправляли, и проверка их не приняла:\n' +
+          tried.map(function (t) { return '— ' + t; }).join('\n') +
+          '\nЭти варианты больше не предлагай. Выбери ДРУГОЙ и объясни себе, ' +
+          'чем он лучше: перечитай вопрос и все варианты заново.';
+      }
       if (ctx && ctx.checkError) {
-        base += '\n\nПрошлый вариант не подошёл. Отчёт проверяющей системы:\n' +
-          String(ctx.checkError).slice(0, 1000) +
-          '\nВыбери ДРУГОЙ вариант.';
+        base += '\n\nЧто ответила проверка:\n' + String(ctx.checkError).slice(0, 1000);
       }
       return base;
+    }
+
+    if (kind === 'text') {
+      var tbase = aiLessonBlock() + '\nОтветь на вопрос коротко: одна строка, без пояснений.\n' +
+        '\nВопрос:\n' + task;
+      if (ctx && ctx.checkError) {
+        tbase += '\n\nПрошлый ответ не подошёл. Что ответила проверка:\n' +
+          String(ctx.checkError).slice(0, 1000) + '\nОтветь иначе.';
+      }
+      return tbase;
     }
 
     var ask2 = lang ? 'Пиши на ' + lang + '.' : 'Определи язык по условию и пиши на нём.';
@@ -2568,6 +2638,11 @@ async function jobCollect(ctx, target) {
   }
 
   function stepErrorText() {
+    /* У теста с выбором разбора в .smart-hints нет: Stepik пишет «Пока
+       неправильно, попробуйте еще раз!» в шапке результата. Без этого ветка
+       проверки отчёта не находила и правки не было.                            */
+    var head = $('.submission-show__header .submission-show__title-content') ||
+      $('.submission-show__header') || $('.attempt-wrapper__result-title');
     var box = $('.submission-show__submission-hint');
     var nodes = box ? $$('.smart-hints__hint', box).filter(function (n) {
       return !(n.closest && n.closest('.code-runner__hints'));
@@ -2578,6 +2653,10 @@ async function jobCollect(ctx, target) {
       if (t.length > 3) parts.push(t);
     });
     if (parts.length) return parts.join('\n');
+    if (head) {
+      var ht = norm(head.textContent || '');
+      if (ht.length > 3) return ht;
+    }
     if (box) return norm(box.textContent || '');
     /* запасной путь: контейнер без разметки, но не панель запуска */
     var alt = $$('.submission-show__submission-hint, .attempt-wrapper-alerts .smart-hints')
@@ -2586,12 +2665,20 @@ async function jobCollect(ctx, target) {
   }
 
   /* Ошибка бывает и без слова «Failed»: «Wrong answer», «Compilation error»,
-     «Time limit exceeded». Достаточно, чтобы отчёт появился и не был «верно». */
+     «Time limit exceeded», а у теста с выбором — просто «Пока неправильно,
+     попробуйте еще раз!». Достаточно, чтобы отчёт появился и не был «верно».  */
   function looksLikeCheckError(text) {
     var t = String(text || '');
     if (t.length < 12) return false;
-    if (/correct|верно|принят|зачтено|Success/i.test(t) && !/Failed/i.test(t)) return false;
-    return /Failed|Wrong|Error|error|отличает|не совпад|expected|Traceback|Exception/i.test(t);
+    /* Отрицание проверяем ПЕРВЫМ: «неверно» содержит «верно», и старая проверка
+       на успех отбрасывала настоящую ошибку — поэтому провал теста с выбором
+       не замечался и правки не было.                                          */
+    if (/не\s*правильно|неправильно|не\s*верно|неверно|попробуй\w*\s+ещ[ёе]/i.test(t)) return true;
+    if (/wrong|failed|incorrect/i.test(t)) return true;
+    /* Успех перечисляем полностью: «Верно» и «всё правильно» — это похвала,
+       и раньше «верно» в последней строке делало их ошибкой.                  */
+    if (/correct|верно|правильно|принят|зачтено|success/i.test(t)) return false;
+    return /error|отличает|не совпад|expected|traceback|exception/i.test(t);
   }
 
   /* Собираем то, что ушло в прошлый раз: ответ модели и код, который на самом
@@ -2819,6 +2906,9 @@ async function jobCollect(ctx, target) {
      иначе на «неверно» можно зациклиться и жечь лимит бесконечно.                */
   var aiFixTried = {};
   var aiFixBusy = {};                   /* защёлка: одну отправку правим один раз */
+  /* ключ шага → варианты, которые уже отправляли и которые не подошли: при
+     повторной попытке просим ДРУГОЙ вариант, а не тот же самый                  */
+  var aiTriedChoices = {};
   var AI_FIX_MARKS = 2;                 /* столько правок на один шаг */
 
   async function aiSelfCorrect(ctx) {
@@ -2987,7 +3077,10 @@ async function jobCollect(ctx, target) {
       return { skipped: 'нет места для вставки' };
     }
 
-    var kind = aiAnswer.kind === 'choice' ? 'choice' : 'code';
+    /* Вид берём из ответа: 'text' — свободный ответ в поле, его нельзя сводить
+       к 'code', иначе он уходит по ветке редактора и в ленте пишется про код. */
+    var kind = aiAnswer.kind === 'choice' ? 'choice'
+      : (aiAnswer.kind === 'text' ? 'text' : 'code');
     var target = insertTarget();
 
     var res;
@@ -2999,11 +3092,29 @@ async function jobCollect(ctx, target) {
           ((res && res.error) || 'неизвестная причина') + '.', 'sys');
         return { skipped: (res && res.error) || 'ошибка выбора' };
       }
+      /* Запоминаем, что уже отправляли: при провале попросим ДРУГОЙ вариант,
+         иначе модель вернёт тот же и человек получит ту же ошибку.            */
+      var tried = aiTriedChoices[ctx.key] || (aiTriedChoices[ctx.key] = []);
+      (picked.answers || []).forEach(function (t) {
+        if (tried.indexOf(t) < 0) tried.push(t);
+      });
       aiLogAdd('Отметил вариант ответа. Осталось нажать «Отправить на проверку».', 'sys');
       if (target) flash(target.anchor);
       /* У теста с выбором запускать нечего: там нет ни редактора, ни кнопки
          «Запустить код». Раньше скрипт честно искал её и писал «не нашёл».      */
       return { inserted: true, ran: false, kind: 'choice' };
+    }
+
+    if (kind === 'text') {
+      var area = $('.string-quiz__textarea') || $('.attempt-wrapper__plugin textarea');
+      if (!area) {
+        aiLogAdd('Поля для ответа на шаге нет — вписать некуда.', 'sys');
+        return { skipped: 'нет поля для ответа' };
+      }
+      setNative(area, String(aiAnswer.text).trim());
+      aiLogAdd('Записал ответ в поле. Осталось нажать «Отправить на проверку».', 'sys');
+      if (target) flash(target.anchor);
+      return { inserted: true, ran: false, kind: 'text' };
     }
 
     /* Код набираем строка за строкой — как будто пишет человек. Длинное решение
@@ -3059,7 +3170,8 @@ async function jobCollect(ctx, target) {
       log('в ответе ИИ одни размышления, а не решение — в хранилище не кладу');
       return { skipped: 'размышления вместо ответа' };
     }
-    var kind = aiAnswer.kind === 'choice' ? 'choice' : 'code';
+    var kind = aiAnswer.kind === 'choice' ? 'choice'
+      : (aiAnswer.kind === 'text' ? 'text' : 'code');
     var content = aiAnswer.text;
     /* У теста с выбором ответ модели — текст, а хранилищу нужны варианты. Если
        сопоставить не вышло, это не повод класть мусор: говорим честно.            */
@@ -3073,7 +3185,8 @@ async function jobCollect(ctx, target) {
     }
     /* Расширение выбирает вид ответа, а не язык: у теста с выбором это всегда .json
        (иначе файл ложился как .txt и «вставить» его не находил).                   */
-    var ext = kind === 'choice' ? 'json' : extOf(aiAnswer.lang || '');
+    var ext = kind === 'choice' ? 'json'
+      : (kind === 'text' ? 'txt' : extOf(aiAnswer.lang || ''));
     var res = await saveAnswer(ctx, {
       kind: kind, ext: ext, content: content
     }, true);
@@ -3300,11 +3413,64 @@ async function jobCollect(ctx, target) {
     else if (window.prompt) window.prompt('Скопируй решение:', s);
   }
 
+  /* Один ответ или несколько — видно по типу поля: radio или checkbox.
+     От этого зависит и форма метки в чате, и то, что мы говорим модели.        */
+  function choiceMultiple() {
+    return !!$('.quiz-component[data-type="choice-quiz"] input[type="checkbox"],' +
+      ' .quiz-plugin__content input[type="checkbox"]');
+  }
+
+  /* Тест с выбором показываем списком вариантов с меткой: круг — один ответ,
+     квадрат — несколько. Выбранное закрашиваем. Раньше в ленте был просто текст
+     ответа, и человек не видел, что именно отмечено на странице.              */
+  function aiLogChoice(picked) {
+    var log = aiLogEl();
+    if (!log) return null;
+    var opts = choiceOptions();
+    if (!opts.length) return null;
+    var multiple = choiceMultiple();
+    var wantIds = ((picked && picked.ids) || []).map(String);
+    var wantTxt = ((picked && picked.answers) || []).map(norm);
+
+    var box = document.createElement('div');
+    box.className = 'sgx-ai-msg sgx-ai-opts';
+    opts.forEach(function (o) {
+      var on = wantIds.indexOf(String(o.id)) >= 0 ||
+        (wantTxt.length > 0 && wantTxt.indexOf(norm(o.text)) >= 0);
+      var row = document.createElement('div');
+      row.className = 'sgx-ai-opt' + (on ? ' on' : '');
+      var mark = document.createElement('span');
+      mark.className = 'sgx-ai-mark ' + (multiple ? 'box' : 'circle');
+      row.appendChild(mark);
+      var txt = document.createElement('span');
+      txt.className = 'sgx-ai-opttext';
+      txt.textContent = o.text;
+      row.appendChild(txt);
+      box.appendChild(row);
+    });
+    var note = document.createElement('div');
+    note.className = 'sgx-ai-optnote';
+    note.textContent = multiple
+      ? 'Здесь можно выбрать несколько — отметил нужные.'
+      : 'Здесь один ответ — отметил выбранный.';
+    box.appendChild(note);
+
+    log.appendChild(aiRow(box, aiAnswer && aiAnswer.model));
+    log.scrollTop = log.scrollHeight;
+    return box;
+  }
+
   /* Показать готовое решение в ленте. Никаких подписей «свой ключ» и названий
      моделей: это служебные подробности скрипта, человеку их знать не нужно,
      а ленту они засоряют. Модель и так видна в шапке блока.                    */
   function aiLogAnswer() {
     if (!aiAnswer || !aiAnswer.text) return;
+    /* У теста с выбором показываем не текст ответа, а сами варианты с метками:
+       человеку нужно видеть, какой кружок закрашен.                            */
+    if (aiAnswer.kind === 'choice') {
+      var picked = choiceFromText(aiAnswer.text);
+      if (aiLogChoice(picked)) return;
+    }
     /* под логотипом именно той модели, что ответила: человек мог переключить
        модель после ответа, и подпись не должна ему врать                        */
     aiLogAdd(aiAnswer.text, '', true, aiAnswer.model);
@@ -3671,11 +3837,20 @@ async function jobCollect(ctx, target) {
       '</div>'
     ].join('');
 
-    /* В блоке только одно действие — сброс ленты. Печатать здесь нечего, а
-       копирование живёт в самом коде.                                          */
+    /* Сброс чистит переписку, но НЕ закрывает блок. Раньше он прятал блок, и
+       вернуть его было нечем: скоба показывается только когда есть ответ, а
+       меню «Показать решение» требует готового решения — после сброса его нет.
+       Человек нажимал «очистить» и оставался без панели.                        */
     root.querySelector('#sgx-ai-reset').addEventListener('click', function () {
+      var ctx = stepContext();
+      if (ctx && aiAnswer && aiAnswer.key === ctx.key) {
+        aiAnswer = null;
+        saveAi();
+      }
       aiLogClear();
-      aiShow(false);
+      aiShow(true);
+      aiLogAdd('Начнём заново. Нажми «Спросить ИИ» — решу это задание с нуля.', 'sys');
+      setStatus('ИИ: лента очищена');
     });
 
     /* Список моделей: открыть/закрыть, выбрать, закрыть по щелчку мимо и по Esc. */
