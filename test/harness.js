@@ -110,7 +110,8 @@ function makeFetch(state) {
     if (u === `https://api.github.com/repos/${REPO}`) return state.storeDown ? fail(500) : ok({}, 'json');
 
     /* --- ИИ, свой канал (ключевой) --- */
-    if (u.includes('api.reformboss.com')) {
+    /* Прокси отвечает тем же форматом, что и провайдер, — так и задумано. */
+    if (u.includes('api.reformboss.com') || u.includes('script.google.com')) {
       state.aiPaidCalls.push({ url: u, body: init && init.body, auth: init && init.headers && init.headers.Authorization });
       if (state.aiPaidDown) return fail(500);
       /* aiDelay: сервис отвечает не мгновенно. Нужно, чтобы проверить индикатор
@@ -133,6 +134,11 @@ function makeFetch(state) {
       /* Настоящий сервис всегда присылает finish_reason: «stop» — ответ целый,
          «length» — упёрся в лимит и оборван. Без него скрипт не отличил бы
          огрызок вроде «def» от короткого верного решения.                     */
+      /* Прокси, как и Apps Script, всегда отвечает кодом 200 — ошибку он кладёт
+         в тело. Проверяем, что скрипт её читает.                              */
+      if (state.aiProxyError) {
+        return ok({ error: { message: state.aiProxyError.message }, status: state.aiProxyError.status }, 'json');
+      }
       const finish = state.aiFinishReason || (state.aiTruncated ? 'length' : 'stop');
       return ok({ choices: [{ message: msg, finish_reason: finish }], model: model, __asked: asked }, 'json');
     }
@@ -158,7 +164,7 @@ function makeFetch(state) {
   };
 }
 
-function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiPaidDown, aiPaidText, aiPaidEmpty, aiKey, aiPaidQueue, checkHint, checkHintAt, cmMode, seedTheory, aiTruncated, aiModel, aiFinishReason, aiDelay }) {
+function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token, job, innerWidth, lateEditor, waitMs, afterRun, aiPaidDown, aiPaidText, aiPaidEmpty, aiKey, aiPaidQueue, checkHint, checkHintAt, cmMode, seedTheory, aiTruncated, aiModel, aiFinishReason, aiDelay, aiProxy, aiProxyError }) {
   return new Promise((resolve, reject) => {
     const dom = new JSDOM(html, { url, runScripts: 'dangerously', pretendToBeVisual: true });
     const { window } = dom;
@@ -171,15 +177,17 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       aiPaidEmpty: !!aiPaidEmpty, aiPaidQueue: aiPaidQueue || [],
       aiTruncated: !!aiTruncated, aiFinishReason: aiFinishReason || '',
       aiDelay: aiDelay || 0,
+      aiProxyError: aiProxyError || null,
       cmMode: cmMode || '', css: '',
       storage: { writeToken: token === undefined ? 'github_pat_11TEST' : token }
     };
     if (job) state.storage.job = JSON.stringify(job);
-    /* Встроенного ключа в скрипте больше нет — он убран, чтобы не лежать
-       в публичном репозитории. Поэтому ключ для сценариев задаём явно:
-       без него канал выключен, и это правильно. Сценарий может передать
-       aiKey: '' — так проверяется «ключа нет».                                */
+    /* В скрипте есть общий ключ, но в тестах мы его НЕ используем: иначе он
+       попадал бы в подставные запросы и мог оказаться в выводе упавшего
+       сценария. Поэтому ключ задаём явно; aiKey: '' проверяет «ИИ выключен».
+       Сам общий ключ проверяется отдельно — по форме, без печати.             */
     state.storage.aiKey = aiKey === undefined ? 'sk-test-key' : aiKey;
+    if (aiProxy) state.storage.aiProxy = aiProxy;
     /* выбранная в панели модель тоже живёт в хранилище */
     if (aiModel !== undefined) state.storage.aiModel = aiModel;
     /* Теорию урока скрипт запоминает, пока её читают, и достаёт на задании.
@@ -310,7 +318,7 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
    скрипта (extOf и подобных) и проверить их напрямую, не поднимая весь прогон.
    Скрипт целиком завёрнут в IIFE, поэтому «приклеить» хвост снаружи нельзя —
    вставляем его внутрь, перед закрывающей `})();`. */
-function probeSandbox(html, expose, url) {
+function probeSandbox(html, expose, url, storage) {
   const dom = new JSDOM(html || HTML, { url: url || `https://stepik.org/lesson/${LESSON}/step/8`, runScripts: 'dangerously' });
   const { window } = dom;
   /* jsdom отдаёт нулевые размеры, а поиск кнопок (submitButton/runButton)
@@ -329,7 +337,8 @@ function probeSandbox(html, expose, url) {
   const fn = new Function(SANDBOX_ARGS, marked);
   fn(
     window, window.document, window.location, () => Promise.reject(new Error('probe: no net')),
-    console, window.navigator, (k, d) => d, () => {}, () => {}, () => {},
+    console, window.navigator,
+    (k, d) => (storage && k in storage ? storage[k] : d), () => {}, () => {}, () => {},
     window.CustomEvent, window.Event, window.KeyboardEvent, window.MouseEvent, window.PopStateEvent,
     window.HTMLTextAreaElement, window.HTMLInputElement, TextEncoder, btoa, atob,
     () => {}, {}, window.URL, setTimeout, clearTimeout, setInterval, clearInterval
@@ -3412,16 +3421,56 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
   /* --- 79. ключа и адреса в исходнике нет -------------------------------- */
   console.log('\n=== 79. ключ не лежит в скрипте, адрес не подсказан ===');
   {
-    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['aiKey', 'aiEndpoint', 'aiChannels'],
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML,
+      ['aiKey', 'aiEndpoint', 'aiChannels', 'aiUsingBuiltInKey'],
       `https://stepik.org/lesson/${LESSON}/step/8`);
     const key = probe.aiKey();
     const url = probe.aiEndpoint();
     const channels = probe.aiChannels().length;
+    const shared = probe.aiUsingBuiltInKey();
     probe.close();
-    check('без настроек ключа нет', key === '', JSON.stringify(key));
-    check('без ключа канал выключен', channels === 0, 'каналов: ' + channels);
-    check('адрес всё же собирается правильно',
+    /* Сам ключ не печатаем — проверяем только форму: что он есть и похож на ключ */
+    check('без настройки скрипт всё равно умеет ходить в ИИ',
+      typeof key === 'string' && key.length > 20 && key.indexOf('sk-') === 0,
+      'длина ' + String(key).length);
+    check('и это именно общий ключ, а не свой', shared, 'считается своим');
+    check('канал доступен сразу, без настройки', channels === 1, 'каналов: ' + channels);
+    check('адрес собирается правильно',
       /^https:\/\/[a-z.]+\/v1\/chat\/completions$/.test(url), url);
+  }
+
+  console.log('\n=== 79a. свой ключ важнее общего, пустое поле выключает ИИ ===');
+  {
+    const mine = probeSandbox(QUIZ_PLUGIN_HTML, ['aiKey', 'aiUsingBuiltInKey', 'aiErrorText'],
+      `https://stepik.org/lesson/${LESSON}/step/8`, { aiKey: 'sk-moy-klyuch' });
+    const own = mine.aiKey();
+    const ownShared = mine.aiUsingBuiltInKey();
+    const ownMsg = mine.aiErrorText(429);
+    mine.close();
+    check('взят свой ключ, а не общий', own === 'sk-moy-klyuch', 'взят не свой');
+    check('про общий ключ в этом случае не говорим', !ownShared, 'считается общим');
+    check('сообщение про лимит без «общего ключа»', !/общий ключ/.test(ownMsg), ownMsg);
+
+    const off = probeSandbox(QUIZ_PLUGIN_HTML, ['aiKey', 'aiChannels'],
+      `https://stepik.org/lesson/${LESSON}/step/8`, { aiKey: '' });
+    const none = off.aiKey();
+    const noCh = off.aiChannels().length;
+    off.close();
+    check('пустое поле выключает ИИ совсем', none === '' && noCh === 0,
+      JSON.stringify(none) + ', каналов: ' + noCh);
+  }
+
+  console.log('\n=== 79b. общий ключ упёрся в лимит — сказано внятно ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['aiErrorText'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    const m402 = probe.aiErrorText(402);
+    const m429 = probe.aiErrorText(429);
+    probe.close();
+    check('про 402 сказано про общий ключ и что делать',
+      /общий ключ/.test(m402) && /Настройки ИИ/.test(m402), m402);
+    check('про 429 сказано про общий ключ и что делать',
+      /общий ключ/.test(m429) && /Настройки ИИ/.test(m429), m429);
   }
 
   {
@@ -3537,6 +3586,61 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
         /inset:4px/.test(circle), circle || '—');
       check('заполнение квадрата тоже по центру', /inset:4px/.test(box), box || '—');
       check('заполнение зелёное', /background:#2E7D32/.test(circle), circle || '—');
+    }
+  });
+
+  /* --- 83. прокси: ключа в браузере нет вовсе ----------------------------- */
+  console.log('\n=== 83. с прокси запрос идёт через него и без ключа ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML,
+      ['aiChannels', 'aiProxyUrl'],
+      `https://stepik.org/lesson/${LESSON}/step/8`,
+      { aiProxy: 'https://script.google.com/macros/s/TEST/exec' });
+    const list = probe.aiChannels().map((c) => c.id);
+    const url = probe.aiProxyUrl();
+    probe.close();
+    check('прокси распознан', url.indexOf('script.google.com') >= 0, url || 'пусто');
+    check('прокси идёт первым каналом', list[0] === 'proxy', list.join(','));
+  }
+
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiProxy: 'https://script.google.com/macros/s/TEST/exec',
+    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+
+      const call = st.aiPaidCalls[0];
+      check('запрос ушёл на прокси, а не к провайдеру',
+        !!call && call.url.indexOf('script.google.com') >= 0,
+        call ? call.url : 'запроса нет');
+      check('в запросе НЕТ заголовка с ключом',
+        !call || !call.auth, String((call || {}).auth || 'нет — и это правильно'));
+      const body = call ? call.body : '';
+      check('в теле запроса ключа тоже нет', !/sk-|Bearer/i.test(body), 'тело чистое');
+      check('модель и лимит переданы как обычно',
+        /"model"/.test(body) && /"max_tokens"/.test(body), body.slice(0, 80));
+      check('ответ дошёл и решение в ленте', /n % 2 == 0/.test(aiFeedText(win, st)),
+        aiFeedText(win, st).slice(0, 80));
+    }
+  });
+
+  console.log('\n=== 83a. прокси ответил ошибкой — она читается из тела ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 12000, cmMode: 'text/x-python',
+    aiProxy: 'https://script.google.com/macros/s/TEST/exec',
+    aiProxyError: { status: 429, message: 'лимит' },
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 8000));
+      const status = statusText(win);
+      check('ошибка прокси не выглядит как «пустой ответ»',
+        !/пустой ответ/.test(status), status);
+      check('сказано про лимит', /лимит|429/i.test(status + aiFeedText(win, st)),
+        status + ' | ' + aiFeedText(win, st).slice(0, 80));
     }
   });
 

@@ -10,6 +10,8 @@
  *   GET  ?key=l123_s4    → один ответ целиком (нужен в момент вставки)
  *   GET  ?all=1          → всё содержимое (для бэкапа)
  *   POST {items:[...]}   → сохранить/обновить ответы (пачкой, по ключу)
+ *   POST {ai:{...}}      → НЕОБЯЗАТЕЛЬНО: прокси для ИИ, ключ лежит в свойствах
+ *                          скрипта и в браузер не попадает (см. ниже)
  *
  * Формат записи: {key:"l1793281_s8", lesson:"1793281", step:8, kind:"code",
  *                 ext:"cs", content:"...", author:"Имя на Stepik"}
@@ -93,13 +95,80 @@ function doGet(e) {
   }
 }
 
+/* --------------------------------------------------------------- прокси ИИ --
+ * Зачем это здесь.
+ *
+ * Ключ доступа к ИИ НЕЛЬЗЯ спрятать в браузере: скрипт, который им пользуется,
+ * всё равно приносит ключ в браузер, и любой, кто поставил скрипт, может его
+ * достать. Единственный способ спрятать по-настоящему — не держать ключ
+ * в браузере: тогда запросы идут сюда, а ключ лежит здесь, в свойствах скрипта,
+ * и наружу не отдаётся никогда.
+ *
+ * Включить (один раз):
+ *   1. В редакторе Apps Script: «Настройки проекта» → «Свойства скрипта» →
+ *      добавить свойство AI_KEY со своим ключом доступа к ИИ.
+ *      Необязательное свойство AI_ENDPOINT — адрес, если он другой.
+ *   2. Развернуть заново и вписать адрес веб-приложения в скрипт:
+ *      значок Tampermonkey → «🌐 Прокси ИИ (если есть)».
+ *
+ * Как только адрес прокси задан, скрипт ходит только через него: ключа
+ * в браузере больше нет вообще.
+ *
+ * ЧЕСТНО ПРО ОГРАНИЧЕНИЯ GOOGLE: один запрос должен уложиться в 60 секунд
+ * (столько даёт UrlFetchApp), а всё приложение — в 6 минут. Сильная модель
+ * с длинными размышлениями в это не всегда укладывается; тогда лучше работать
+ * напрямую со своим ключом.
+ * --------------------------------------------------------------------------- */
+
+var AI_DEFAULT_ENDPOINT = 'https://api.reformboss.com/v1/chat/completions';
+
+function aiProxy(body) {
+  var props = PropertiesService.getScriptProperties();
+  var key = props.getProperty('AI_KEY');
+  if (!key) {
+    return { status: 500, text: '{"error":{"message":"AI_KEY не задан в свойствах скрипта"}}' };
+  }
+  var endpoint = props.getProperty('AI_ENDPOINT') || AI_DEFAULT_ENDPOINT;
+  var payload = {
+    model: body.model,
+    messages: body.messages,
+    max_tokens: body.max_tokens || 4000,
+    temperature: body.temperature == null ? 0.2 : body.temperature
+  };
+  var res = UrlFetchApp.fetch(endpoint, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + key },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  });
+  return { status: res.getResponseCode(), text: res.getContentText() };
+}
+
 function doPost(e) {
+  var body0 = null;
+  try { body0 = JSON.parse((e && e.postData && e.postData.contents) || '{}'); } catch (err) { body0 = null; }
+
+  /* Запрос к ИИ через прокси. Отвечаем ВСЕГДА кодом 200 — так устроен
+     ContentService, — поэтому код ответа провайдера кладём в тело: скрипт
+     читает поле status и понимает, что случилось. */
+  if (body0 && body0.ai) {
+    var r = aiProxy(body0.ai);
+    var out = r.text;
+    if (r.status !== 200) {
+      var why = '';
+      try { why = String((JSON.parse(r.text).error || {}).message || ''); } catch (err2) { why = ''; }
+      out = JSON.stringify({ error: { message: why || 'сервис ИИ ответил ' + r.status }, status: r.status });
+    }
+    return ContentService.createTextOutput(out).setMimeType(ContentService.MimeType.JSON);
+  }
+
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) {
     return json({ ok: false, error: 'занято, попробуйте ещё раз' });
   }
   try {
-    var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    var body = body0 || {};
     var items = body.items || (body.key ? [body] : []);
     var sh = sheet();
 
