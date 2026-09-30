@@ -779,6 +779,11 @@
   "ext": "json",
   "kind": "choice"
  },
+ "l1812981_s4": {
+  "file": "l1812981_s4.txt",
+  "ext": "txt",
+  "kind": "code"
+ },
  "l1812981_s8": {
   "file": "l1812981_s8.py",
   "ext": "py",
