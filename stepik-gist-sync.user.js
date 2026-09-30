@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.9.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам — отмечает нужный вариант. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
+// @version      6.10.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам — отмечает нужный вариант. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
@@ -64,7 +64,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.9.0';
+  var VERSION = '6.10.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -698,8 +698,10 @@
     return { ok: true, via: 'варианты', hits: hits };
   }
 
-/* Возвращаем и поле для вставки, и якорь для скобы: скоба должна обрамлять
-     весь блок задания (.attempt-wrapper__content), а не отдельный вопрос. */
+/* Возвращаем и поле для вставки, и якорь для скобы. Якорь — ИМЕННО этот блок:
+     редактор кода или блок с вариантами, а не вся карточка задания. Раньше скоба
+     обрамляла весь .attempt-wrapper__content вместе с заголовком, условием и
+     кнопками, и человек просил так не растягивать её.                          */
   function insertTarget() {
     var el = null;
     var q = $('.quiz-component[data-type="choice-quiz"] input:not([disabled]),' +
@@ -718,7 +720,25 @@
       if (field) el = field;
     }
     if (!el) return null;
-    return { el: el, anchor: cardOf(el) || el };
+    return { el: el, anchor: tightBlockOf(el) || cardOf(el) || el };
+  }
+
+  /* Самый узкий осмысленный блок вокруг элемента: сначала редактор, потом блок
+     с вариантами. Важно, что блок ИИ лежит РЯДОМ с редактором, а не внутри него,
+     поэтому в рамку он не попадает.                                            */
+  var TIGHT_SELS = [
+    '.CodeMirror', '.cm-editor', '.code-editor-quiz__editor', '.code-quiz__code',
+    '.code-editor', '.quiz-component'
+  ];
+
+  function tightBlockOf(el) {
+    for (var i = 0; i < TIGHT_SELS.length; i++) {
+      var node = el && el.closest ? el.closest(TIGHT_SELS[i]) : null;
+      if (!node) continue;
+      var r = node.getBoundingClientRect();
+      if (r.height > 40 && r.width > 160) return node;
+    }
+    return null;
   }
 
   function cardOf(el) {
@@ -795,18 +815,20 @@
   /* -------------------------------------------------------------------- UI */
 
   GM_addStyle([
-    /* --- скоба «вставить»: контрастная, чтобы её было видно --- */
+    /* --- скоба «вставить» ---
+       Ни рамки, ни белой заливки: человек просил убрать синюю обводку и
+       внутреннюю заливку. Остаётся сама скобка и кнопки — они и так заметные.
+       Скобка рисуется: путь обводится от начала к концу (см. drawBrace).        */
     '#sgx-chip{position:fixed;z-index:2147483000;display:none;align-items:stretch;pointer-events:none;',
     'font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
     '#sgx-chip.on{display:flex}',
     '#sgx-chip .sgx-brace{flex:none;display:block;overflow:visible}',
     '#sgx-chip.above .sgx-brace{display:none}',
-    '#sgx-chip .sgx-body{display:flex;flex-direction:column;justify-content:center;gap:6px;padding:8px 12px;',
-    'pointer-events:auto;background:#FFFFFF;border:1.5px solid #2F7CE0;border-radius:10px;',
-    'box-shadow:0 3px 12px rgba(47,124,224,.25),0 1px 2px rgba(0,0,0,.10)}',
+    '#sgx-chip .sgx-body{display:flex;flex-direction:column;justify-content:center;gap:6px;',
+    'padding:8px 10px;pointer-events:auto;background:transparent;border:0;border-radius:0}',
     '#sgx-chip .sgx-label{color:#1F1D1B;font-weight:700;font-size:15px}',
     '#sgx-chip .sgx-acts{display:flex;align-items:center;gap:8px}',
-    '#sgx-chip .sgx-sep{color:#C9C7C4}',
+    '#sgx-chip .sgx-sep{color:#B9B7B2}',
     '#sgx-chip .sgx-act{border:0;border-radius:7px;padding:7px 13px;cursor:pointer;',
     'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:14.5px;font-weight:600;line-height:1.2;background:#2F7CE0;color:#fff}',
     '#sgx-chip .sgx-act:hover{background:#2769C4}',
@@ -1083,19 +1105,92 @@
     return chip;
   }
 
+  /* Скоба рисуется, а не просто появляется: путь обводится от начала к концу.
+     Длину берём у самого пути — она зависит от высоты блока.                   */
+  function drawBrace(path) {
+    if (!path) return;
+    var len = 0;
+    try { len = path.getTotalLength ? path.getTotalLength() : 0; } catch (e) { len = 0; }
+    if (!len) return;                       /* в тестах длины может не быть */
+    path.style.transition = 'none';
+    path.style.strokeDasharray = String(len);
+    path.style.strokeDashoffset = String(len);
+    var kick = function () {
+      path.style.transition = 'stroke-dashoffset .5s ease-out';
+      path.style.strokeDashoffset = '0';
+    };
+    /* кадр нужен, иначе браузер склеит начало и конец и линии не будет */
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(kick);
+    else setTimeout(kick, 20);
+  }
+
+  /* Места справа нет — не переносим скобку наверх, а ужимаем содержимое влево,
+     чтобы она поместилась: человек просил «все уменьшить налево». Правку
+     запоминаем и снимаем, когда скоба прячется.                                 */
+  var squeezedEl = null, squeezedOld = '';
+
+  function squeezeHost(anchor) {
+    if (!anchor || !anchor.closest) return null;
+    return anchor.closest('.attempt-wrapper__content') || anchor.closest('.quiz-plugin') ||
+      anchor.parentElement || null;
+  }
+
+  function squeezeRight(host, px) {
+    if (squeezedEl && squeezedEl !== host) {
+      squeezedEl.style.marginRight = squeezedOld;
+      squeezedEl = null;
+      squeezedOld = '';
+    }
+    if (!host) return;
+    if (px <= 0) {
+      if (host === squeezedEl) {
+        host.style.marginRight = squeezedOld;
+        squeezedEl = null;
+        squeezedOld = '';
+      }
+      return;
+    }
+    if (squeezedEl !== host) {
+      squeezedOld = host.style.marginRight || '';
+      squeezedEl = host;
+    }
+    host.style.marginRight = Math.round(px) + 'px';
+  }
+
   function positionChip(target) {
     if (!chip || !target) return;
     var card = target.anchor;
     if (!card) return;
-    var r = card.getBoundingClientRect();
-    if (!r.width && !r.height) { chip.classList.remove('on'); return; }
+    var r0 = card.getBoundingClientRect();
+    if (!r0.width && !r0.height) { chip.classList.remove('on'); return; }
 
     var body = chip.querySelector('.sgx-body');
     var bodyW = (body && body.offsetWidth) || 150;
+    var need = bodyW + BRACE_W + 8;
+    var host = squeezeHost(card);
+
+    /* Меряем «естественное» положение: сначала снимаем своё ужимание. Иначе на
+       втором проходе окажется, что место уже есть, отступ снимется — и скоба
+       начнёт дёргаться между двумя положениями.                                */
+    var mine = squeezedEl && squeezedEl === host ? squeezedEl.style.marginRight : '';
+    if (mine) squeezedEl.style.marginRight = squeezedOld;
+    var bare = card.getBoundingClientRect();
+    var hostW = host ? host.getBoundingClientRect().width : 0;
+    var natural = window.innerWidth - bare.right - 14;
+    var want = 0;
+    if (natural < need) {
+      var deficit = need - natural + 16;
+      if (host && hostW - deficit > 320) want = deficit;
+    }
+    if (mine) squeezedEl.style.marginRight = mine;
+    squeezeRight(host, want);
+
+    var r = card.getBoundingClientRect();
     var spaceRight = window.innerWidth - r.right - 14;
 
-    /* справа не помещается — показываем полоску прямо над карточкой */
-    if (spaceRight < bodyW + BRACE_W + 8) {
+    /* Не влезает даже после ужимания — переносим наверх. Так бывает на узком
+       экране и в мобильной вёрстке, где содержимое и так во всю ширину.       */
+    if (spaceRight < need) {
       chip.classList.add('above');
       chip.style.height = 'auto';
       var hAbove = (body && body.offsetHeight) || 66;
@@ -1114,7 +1209,15 @@
       svg.setAttribute('height', String(Math.round(h)));
       svg.style.height = Math.round(h) + 'px';
       var path = svg.querySelector('path');
-      if (path) path.setAttribute('d', bracePath(h, BRACE_W));
+      if (path) {
+        path.setAttribute('d', bracePath(h, BRACE_W));
+        /* рисуем один раз на показ: при прокрутке путь пересчитывается, но
+           заново обводить его не надо — это выглядело бы как мигание         */
+        if (chip.getAttribute('data-drawn') !== '1') {
+          chip.setAttribute('data-drawn', '1');
+          drawBrace(path);
+        }
+      }
     }
     chip.style.height = Math.round(h) + 'px';
     chip.style.left = Math.round(r.right + 12) + 'px';
@@ -1126,12 +1229,16 @@
     chip.querySelector('.sgx-label').textContent = label || 'есть решение';
     chip.classList.toggle('sgx-no-answer', !!noAnswer);
     chipAnchor = target;
+    /* каждый показ рисуем скобку заново */
+    chip.removeAttribute('data-drawn');
     chip.classList.add('on');
     positionChip(target);
   }
 
   function hideChip(dismiss) {
     if (chip) chip.classList.remove('on');
+    /* ужимание снимаем: страница должна вернуться к обычной ширине */
+    squeezeRight(null, 0);
     chipAnchor = null;
     if (dismiss) {
       var ctx = stepContext();
@@ -2653,6 +2760,16 @@ async function jobCollect(ctx, target) {
          системный текст, и запрос — иначе модель писала код там, где нужна галочка. */
       var got = await aiCall(aiSystem(stepKindNow()), aiUserFor(ctx), { retry: !fixed });
 
+      /* Пока модель думала, человек мог уйти на другое задание. Тогда ответ
+         относится к прошлому шагу, и показывать его в ленте нового нельзя:
+         выглядело бы как решение текущего.                                    */
+      var here = stepContext();
+      if (here && here.key !== ctx.key) {
+        dropThink(thinking);
+        log('шаг сменился, пока ИИ думал — ответ не показываю');
+        return;
+      }
+
       /* Снимаем ограждения сразу: и в ленте, и при копировании, и при вставке
          в редактор человек должен видеть чистый ответ, а не ```python … ```. */
       var clean = stripFences(got.text) || got.text;
@@ -3877,6 +3994,31 @@ async function jobCollect(ctx, target) {
     }
   }
 
+  /* Сменился шаг. Ленту чистим всегда, а если блок ИИ был открыт — сразу берёмся
+     за новое задание: человек просил «чтобы он сразу новое задание начал делать».
+     Не спрашиваем, если ответ для шага уже лежит в общей папке или если канал
+     недоступен: иначе получится запрос ради запроса.                          */
+  var aiAutoKey = null;                /* для какого шага автозапуск уже был */
+
+  function resetAiForStep(ctx, wasOpen) {
+    aiLogClear();
+    if (!wasOpen || !ctx) return;
+    if (aiAutoKey === ctx.key) return;                 /* уже пробовали */
+    aiAutoKey = ctx.key;
+    if (aiBusy) return;
+    if (!aiChannels().length) return;                  /* нет ключа — не дёргаем */
+    if (cacheIndex()[ctx.key]) return;                 /* ответ уже есть в папке */
+    /* Шаг только что открылся: даём карточке дорисоваться, иначе условия ещё
+       нет и модель получит пустоту.                                          */
+    setTimeout(function () {
+      var now = stepContext();
+      if (!now || now.key !== ctx.key) return;         /* человек ушёл дальше */
+      if (aiBusy) return;
+      if (!aiRootEl() || !aiRootEl().classList.contains('on')) return;
+      askAi();
+    }, 1200);
+  }
+
   async function tick() {
     /* Stepik перерисовывает сайдбар и шапку урока: и панель, и нашу кнопку надо
        переставлять заново, иначе они исчезают после смены шага. */
@@ -3884,7 +4026,8 @@ async function jobCollect(ctx, target) {
     if (panelOpen()) sidebarSlot();
     /* Блок ИИ перерисовывается вместе с карточкой задания — возвращаем его на
        место под редактором, иначе он пропадает при смене шага.                 */
-    if (aiRootEl() && aiRootEl().classList.contains('on')) aiSlot();
+    var aiOpen = !!(aiRootEl() && aiRootEl().classList.contains('on'));
+    if (aiOpen) aiSlot();
 
     var ctx = stepContext();
     if (!ctx) { hideChip(); currentKey = null; return; }
@@ -3898,6 +4041,11 @@ async function jobCollect(ctx, target) {
     if (ctx.key !== currentKey) {
       currentKey = ctx.key;
       hideChip();
+      /* Сменился шаг — ИИ тоже сбрасываем: в ленте остался ответ на прошлое
+         задание, и читать его как решение текущего нельзя. Само решение не
+         выбрасываем — оно привязано к ключу шага, и на прошлом шаге скоба всё
+         ещё предложит его открыть.                                            */
+      resetAiForStep(ctx, aiOpen);
       /* сменился шаг — самое время подтянуть свежий список (не чаще раза в минуту) */
       if (Date.now() - cache.at > 60000) {
         storeIndex(true).catch(function (e) { log('список не обновился:', e.message); });

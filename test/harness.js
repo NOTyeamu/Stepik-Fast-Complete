@@ -11,6 +11,24 @@
 const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
+
+/* --- ускоритель времени ------------------------------------------------------
+   Набор проверяет живой юзерскрипт, а тот живёт на таймерах: шаг опроса 1.5 с,
+   пауза между запросами 0.8 с, ожидания внутри сценариев по 2-16 с. Поэтому
+   прогон идёт столько же, сколько шёл бы в браузере, — это его главная цена.
+   SGX_SPEED=N делит все задержки на N: 2-3 раза быстрее без потери смысла.
+   По умолчанию 1 — поведение не меняется.                                     */
+const SPEED = Math.max(1, Number(process.env.SGX_SPEED || 1) || 1);
+const scale = (ms) => (ms == null ? ms : Math.max(0, Math.round(ms / SPEED)));
+const rawTimeout = global.setTimeout;
+const rawInterval = global.setInterval;
+global.setTimeout = function (fn, ms) {
+  return rawTimeout.apply(null, [fn, scale(ms)].concat([].slice.call(arguments, 2)));
+};
+global.setInterval = function (fn, ms) {
+  return rawInterval.apply(null, [fn, scale(ms)].concat([].slice.call(arguments, 2)));
+};
+if (SPEED > 1) console.log('=== ускоритель: таймеры в ' + SPEED + ' раза быстрее ===');
 const JSZip = require('jszip');
 
 /* крошечный настоящий PNG — вместо скриншота */
@@ -178,12 +196,20 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
     window.URL.createObjectURL = function (blob) { state.docBlob = blob; return 'blob:test'; };
     window.URL.revokeObjectURL = function () {};
 
+    /* jsdom не пересчитывает вёрстку, поэтому моделируем её сами: отступ справа
+       у карточки сужает и вложенные блоки — как это делает браузер. Без этого
+       ужимание «влево» выглядело бы как неработающее.                          */
+    const hostMargin = () => {
+      const host = window.document.querySelector('.attempt-wrapper__content');
+      return parseFloat((host && host.style && host.style.marginRight) || '0') || 0;
+    };
     window.Element.prototype.getBoundingClientRect = function () {
       const cl = this.classList || { contains: () => false };
+      const mr = hostMargin();
       let h = 200;
       if (cl.contains('attempt-wrapper__content')) h = 300;     /* карточка задания */
       else if (cl.contains('quiz-component')) h = 120;          /* блок с вариантами */
-      return { width: 600, height: h, top: 100, left: 50, right: 650, bottom: 100 + h, x: 50, y: 100 };
+      return { width: 600 - mr, height: h, top: 100, left: 50, right: 650 - mr, bottom: 100 + h, x: 50, y: 100 };
     };
     Object.defineProperty(window.HTMLElement.prototype, 'offsetWidth', { get: () => 120, configurable: true });
 
@@ -359,6 +385,28 @@ function statusText(win) {
   const el = win.document.querySelector('#sgx-status');
   if (el) return el.textContent;
   return win.document.documentElement.getAttribute('data-sgx-status') || '';
+}
+
+/* Дождаться условия. Фиксированные паузы ломаются, когда набор запускают с
+   SGX_SPEED: пауза между запросами в скрипте считается по реальным часам и не
+   сжимается вместе с таймерами. Поэтому ждём событие, а не время.            */
+async function until(fn, ms) {
+  const t0 = Date.now();
+  for (;;) {
+    try { if (fn()) return true; } catch (e) { /* ignore */ }
+    if (Date.now() - t0 > (ms || 5000)) return false;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+/* Нажать «Спросить ИИ» и дождаться запроса. Если скрипт отказал из-за паузы
+   между запросами — повторяем нажатие: так проверка не зависит от скорости.  */
+async function askAndWait(win, st, ms) {
+  const before = st.aiPaidCalls.length;
+  st.menu['✨ ИИ: решить текущий шаг']();
+  if (await until(() => st.aiPaidCalls.length > before, ms || 4000)) return true;
+  st.menu['✨ ИИ: решить текущий шаг']();
+  return until(() => st.aiPaidCalls.length > before, ms || 4000);
 }
 
 /* Открыть панель: кнопкой в шапке урока, а если шапки нет — через меню. */
@@ -1026,16 +1074,34 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
     }
   });
 
-  console.log('\n=== 11. скоба переезжает наверх, если справа нет места ===');
+  console.log('\n=== 11. мало места справа → ужимаем содержимое влево ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: { l1793281_s8: { file: 'l1793281_s8.cs', ext: 'cs', kind: 'code', content: 'int x = 1;' } },
+    submissions: [], html: HTML, innerWidth: 560, waitMs: 2000,
+    afterRun: async (win) => {
+      const chip = win.document.querySelector('#sgx-chip');
+      const host = win.document.querySelector('.attempt-wrapper__content');
+      check('скоба показана', chip && chip.classList.contains('on'));
+      check('содержимое ужато влево — появился отступ справа',
+        parseFloat(host.style.marginRight) > 0, host.style.marginRight || 'нет');
+      check('скоба осталась справа, а не переехала наверх',
+        !chip.classList.contains('above'), chip.className);
+    }
+  });
+
+  console.log('\n=== 11a. ужать некуда → скоба переезжает наверх ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
     store: { l1793281_s8: { file: 'l1793281_s8.cs', ext: 'cs', kind: 'code', content: 'int x = 1;' } },
     submissions: [], html: HTML, innerWidth: 400, waitMs: 2000,
     afterRun: async (win) => {
       const chip = win.document.querySelector('#sgx-chip');
+      const host = win.document.querySelector('.attempt-wrapper__content');
       check('скоба показана', chip && chip.classList.contains('on'));
       check('режим «сверху»', chip.classList.contains('above'), chip.className);
       check('спрятана вертикальная скоба', chip.style.height === 'auto', chip.style.height);
+      check('содержимое не ужато впустую', !host.style.marginRight, host.style.marginRight || 'нет');
     }
   });
 
@@ -1126,7 +1192,7 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
     }
   });
 
-  console.log('\n=== 15. скоба обрамляет весь блок задания, а не вопрос ===');
+  console.log('\n=== 15. скоба обрамляет СВОЙ блок, а не всю карточку ===');
   await run({
     url: `https://stepik.org/lesson/${LESSON}/step/9?unit=1818966`,
     store: {
@@ -1139,8 +1205,9 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
     afterRun: async (win) => {
       const chip = win.document.querySelector('#sgx-chip');
       check('скоба показана', chip && chip.classList.contains('on'));
-      check('высота по блоку задания (300), а не по вопросу (120)',
-        chip.style.height === '300px', chip.style.height);
+      /* блок с вариантами в заглушке 120, карточка задания — 300 */
+      check('высота по блоку с вариантами (120), а не по всей карточке (300)',
+        chip.style.height === '120px', chip.style.height);
     }
   });
 
@@ -2024,13 +2091,12 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
         String(st.storage.aiModel));
 
       const before = st.aiPaidCalls.length;
-      st.menu['✨ ИИ: решить текущий шаг']();
-      await new Promise((r) => setTimeout(r, 2500));
+      const asked = await askAndWait(win, st, 5000);
       const last = st.aiPaidCalls[st.aiPaidCalls.length - 1];
       const sent = last ? JSON.parse(last.body).model : '';
-      check('в запрос ушла выбранная модель', sent === 'deepseek-v4-flash', sent || 'запроса нет');
-      check('сделан ещё один запрос', st.aiPaidCalls.length > before,
+      check('сделан ещё один запрос', asked && st.aiPaidCalls.length > before,
         st.aiPaidCalls.length + ' против ' + before);
+      check('в запрос ушла выбранная модель', sent === 'deepseek-v4-flash', sent || 'запроса нет');
     }
   });
 
@@ -2926,7 +2992,162 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
     }
   });
 
+  /* --- 70. скоба обрамляет редактор, а не карточку ------------------------ */
+  console.log('\n=== 70. скоба обрамляет редактор, а блок ИИ в неё не попадает ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['insertTarget', 'tightBlockOf'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    const t = probe.insertTarget();
+    const anchor = t && t.anchor;
+    probe.close();
+    check('якорь найден', !!anchor, 'якоря нет');
+    check('якорь — редактор кода, а не вся карточка',
+      !!anchor && anchor.classList.contains('CodeMirror'),
+      anchor ? anchor.className : '—');
+    check('якорь не равен карточке задания',
+      !!anchor && !anchor.classList.contains('attempt-wrapper__content'),
+      anchor ? anchor.className : '—');
+  }
+
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: { l1793281_s8: { file: 'l1793281_s8.cs', ext: 'cs', kind: 'code', content: 'int x = 1;' } },
+    submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 6000, innerWidth: 1400,
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3000));
+      const root = win.document.querySelector('#sgx-ai-root');
+      const cm = win.document.querySelector('.CodeMirror');
+      check('блок ИИ стоит рядом с редактором, а не внутри него',
+        !!root && !!cm && !cm.contains(root), 'блок внутри редактора');
+      const chip = win.document.querySelector('#sgx-chip');
+      check('скоба показана и стоит справа',
+        !!chip && chip.classList.contains('on') && !chip.classList.contains('above'),
+        chip ? chip.className : 'нет');
+    }
+  });
+
+  /* --- 71. скобка рисуется и больше не белая карточка --------------------- */
+  console.log('\n=== 71. скобка рисуется, без синей обводки и белой заливки ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['drawBrace'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    const pathEl = probe.window.document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    pathEl.getTotalLength = () => 420;
+    probe.drawBrace(pathEl);
+    const dash = pathEl.style.strokeDasharray;
+    const off = pathEl.style.strokeDashoffset;
+    const transBefore = pathEl.style.transition;
+    /* переход включается в следующем кадре — иначе браузер склеит начало и конец */
+    await new Promise((r) => setTimeout(r, 80));
+    const after = pathEl.style.strokeDashoffset;
+    const transAfter = pathEl.style.transition;
+    probe.close();
+    check('длина пути ушла в штрих', dash === '420', dash || '—');
+    check('в начале скобка не проведена', off === '420', off || '—');
+    check('до кадра перехода ещё нет — иначе линия не нарисуется',
+      transBefore === 'none', transBefore || '—');
+    check('после кадра переход включён — линия рисуется',
+      /stroke-dashoffset/.test(transAfter), transAfter || '—');
+    check('после кадра линия дорисована', after === '0', after || '—');
+  }
+
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: { l1793281_s8: { file: 'l1793281_s8.cs', ext: 'cs', kind: 'code', content: 'int x = 1;' } },
+    submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 3000, innerWidth: 1400,
+    afterRun: async (win, st) => {
+      const css = st.css || '';
+      const i = css.indexOf('#sgx-chip .sgx-body{');
+      const rule = i < 0 ? '' : css.slice(i, css.indexOf('}', i) + 1);
+      check('у скобки нет белой заливки', /background:transparent/.test(rule), rule);
+      check('у скобки нет синей обводки', /border:0/.test(rule) && !/#2F7CE0/.test(rule), rule);
+      check('у скобки нет скругления карточки', /border-radius:0/.test(rule), rule);
+      const chip = win.document.querySelector('#sgx-chip');
+      check('скобка отмечена как нарисованная',
+        !!chip && chip.getAttribute('data-drawn') === '1',
+        chip ? String(chip.getAttribute('data-drawn')) : 'нет');
+    }
+  });
+
+  /* --- 72. смена задания сбрасывает ИИ ------------------------------------ */
+  console.log('\n=== 72. перешли на новое задание — лента ИИ сброшена ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML,
+      ['ensureAiRoot', 'aiSlot', 'aiShow', 'aiLogAdd', 'aiLogEl', 'resetAiForStep'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    probe.ensureAiRoot();
+    probe.aiSlot();
+    probe.aiShow(true);
+    probe.aiLogAdd('Ответ на прошлое задание', 'sys');
+    const before = probe.aiLogEl().textContent;
+    probe.resetAiForStep({ key: 'l1793281_s8', step: 8 }, false);
+    const after = probe.aiLogEl().textContent;
+    probe.close();
+    check('до смены шага в ленте был ответ', /прошлое задание/.test(before), before);
+    check('после смены шага лента пуста', after.trim() === '', JSON.stringify(after));
+  }
+
+  console.log('\n=== 72a. блок ИИ открыт → новое задание решается само ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 14000, cmMode: 'text/x-python',
+    /* второй ответ нарочно другой: иначе не отличить «лента очищена» от «в ленте
+       тот же текст»                                                          */
+    aiPaidQueue: [
+      'print(первый_ответ_для_шага_8)\n',
+      'print(второй_ответ_для_шага_11)\n'
+    ],
+    afterRun: async (win, st) => {
+      /* человек работает с ИИ: блок открыт и ответ уже получен */
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+      const first = st.aiPaidCalls.length;
+      check('первый ответ получен', first >= 1, 'запросов: ' + first);
+
+      /* переходим на другой шаг — страница перезагружается, но состояние то же */
+      const before = aiFeedText(win, st);
+      check('в ленте есть ответ', /первый_ответ_для_шага_8/.test(before), before.slice(0, 60));
+
+      /* переходим на другой шаг: адрес меняется, шаг определяется по нему */
+      win.history.pushState({}, '', `/lesson/${LESSON}/step/11?unit=1818966`);
+      await new Promise((r) => setTimeout(r, 6000));
+      const after = aiFeedText(win, st);
+      check('ответ прошлого шага из ленты убран', !/первый_ответ_для_шага_8/.test(after),
+        after.slice(0, 100));
+      check('за новое задание взялись сами, без нажатий',
+        st.aiPaidCalls.length > first, 'запросов: ' + st.aiPaidCalls.length + ', было ' + first);
+      check('в ленте реплика про новый шаг', /Шаг 11\./.test(after), after.slice(0, 100));
+      check('и решение для нового шага', /второй_ответ_для_шага_11/.test(after),
+        after.slice(0, 100));
+    }
+  });
+
+  /* --- 73. ответ, пришедший после ухода, не показывается ------------------ */
+  console.log('\n=== 73. ответ на покинутый шаг в ленту не попадает ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 16000, cmMode: 'text/x-python',
+    aiDelay: 5000, aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      /* пока модель думает, человек уходит на другое задание */
+      await new Promise((r) => setTimeout(r, 1500));
+      win.history.pushState({}, '', `/lesson/${LESSON}/step/11?unit=1818966`);
+      /* ждём дольше, чем идёт ответ */
+      await new Promise((r) => setTimeout(r, 9000));
+      check('ответ на покинутый шаг в ленте не показан',
+        !/n % 2 == 0/.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 120));
+      check('и в редактор он тоже не попал',
+        !/n % 2 == 0/.test(st.setValue || ''), JSON.stringify((st.setValue || '').slice(0, 60)));
+    }
+  });
+
   const failed = results.filter((r) => !r.ok);
   console.log('\n=== ИТОГ: ' + (results.length - failed.length) + '/' + results.length + ' проверок пройдено ===');
   if (failed.length) { console.log('ПРОВАЛЫ: ' + failed.map((f) => f.name).join('; ')); process.exit(1); }
+  /* Выходим ЯВНО. Без этого процесс не завершается: окна jsdom держат живые
+     таймеры, Node ждёт их и висит уже ПОСЛЕ итоговой строки — прогон выглядел
+     как «идёт сорок минут», хотя работа закончилась.                          */
+  process.exit(0);
 })().catch((e) => { console.error('harness error:', e); process.exit(2); });
