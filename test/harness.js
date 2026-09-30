@@ -193,7 +193,17 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
        сценария. Поэтому ключ задаём явно; aiKey: '' проверяет «ИИ выключен».
        Сам общий ключ проверяется отдельно — по форме, без печати.             */
     state.storage.aiKey = aiKey === undefined ? 'sk-test-key' : aiKey;
-    if (aiProxy) state.storage.aiProxy = aiProxy;
+    /* В скрипте встроенный прокси, и по умолчанию он идёт первым каналом.
+       В наборе прокси выключаем явно: иначе сценарии проверяли бы прокси вместо
+       прямого канала, а в запросах не было бы заголовка с ключом — и половина
+       проверок про ключ потеряла бы смысл.
+
+         aiProxy: 'https://…'  — свой адрес;
+         aiProxy: ''           — прокси выключен, работаем напрямую (по умолчанию);
+         aiProxy: null         — ничего не задавать, работает ВСТРОЕННЫЙ прокси.
+
+       Встроенный прокси проверяется сценариями 84 и 84a.                      */
+    if (aiProxy !== null) state.storage.aiProxy = aiProxy === undefined ? '' : aiProxy;
     /* выбранная в панели модель тоже живёт в хранилище */
     if (aiModel !== undefined) state.storage.aiModel = aiModel;
     /* Теорию урока скрипт запоминает, пока её читают, и достаёт на задании.
@@ -3440,7 +3450,7 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       typeof key === 'string' && key.length > 20 && key.indexOf('sk-') === 0,
       'длина ' + String(key).length);
     check('и это именно общий ключ, а не свой', shared, 'считается своим');
-    check('канал доступен сразу, без настройки', channels === 1, 'каналов: ' + channels);
+    check('каналы доступны сразу, без настройки', channels >= 1, 'каналов: ' + channels);
     check('адрес собирается правильно',
       /^https:\/\/[a-z.]+\/v1\/chat\/completions$/.test(url), url);
   }
@@ -3457,13 +3467,22 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
     check('про общий ключ в этом случае не говорим', !ownShared, 'считается общим');
     check('сообщение про лимит без «общего ключа»', !/общий ключ/.test(ownMsg), ownMsg);
 
+    /* Пустой ключ убирает прямой канал, но прокси продолжает работать: это два
+       независимых выключателя. Совсем выключить ИИ можно, убрав и прокси.     */
     const off = probeSandbox(QUIZ_PLUGIN_HTML, ['aiKey', 'aiChannels'],
       `https://stepik.org/lesson/${LESSON}/step/8`, { aiKey: '' });
     const none = off.aiKey();
-    const noCh = off.aiChannels().length;
+    const chLeft = off.aiChannels().map((c) => c.id);
     off.close();
-    check('пустое поле выключает ИИ совсем', none === '' && noCh === 0,
-      JSON.stringify(none) + ', каналов: ' + noCh);
+    check('пустое поле убирает прямой канал', none === '', JSON.stringify(none));
+    check('но прокси продолжает работать', chLeft.indexOf('proxy') >= 0, chLeft.join(','));
+    check('прямого канала в списке нет', chLeft.indexOf('own') < 0, chLeft.join(','));
+
+    const both = probeSandbox(QUIZ_PLUGIN_HTML, ['aiChannels'],
+      `https://stepik.org/lesson/${LESSON}/step/8`, { aiKey: '', aiProxy: '' });
+    const noCh = both.aiChannels().length;
+    both.close();
+    check('ключ и прокси убраны — ИИ выключен совсем', noCh === 0, 'каналов: ' + noCh);
   }
 
   console.log('\n=== 79b. общий ключ упёрся в лимит — сказано внятно ===');
@@ -3664,6 +3683,63 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       check('и что проверить доступ к развёртыванию', /для всех/.test(status), status);
       check('ошибка не выглядит как «пустой ответ модели»',
         !/пустой ответ/.test(status), status);
+    }
+  });
+
+  /* --- 84. встроенный прокси: работает сразу, без настройки --------------- */
+  console.log('\n=== 84. встроенный прокси включён по умолчанию ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML,
+      ['aiProxyUrl', 'aiChannels', 'aiUsingProxy', 'aiProxyCleared'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    const url = probe.aiProxyUrl();
+    const list = probe.aiChannels().map((c) => c.id);
+    const on = probe.aiUsingProxy();
+    probe.close();
+    /* Адрес не печатаем: проверяем форму */
+    check('адрес прокси встроен и раскрывается',
+      url.indexOf('https://script.google.com/macros/s/') === 0 && /\/exec$/.test(url),
+      'длина ' + String(url).length);
+    check('через прокси ходим сразу, без настройки', on, 'прокси выключен');
+    check('прокси идёт первым каналом', list[0] === 'proxy', list.join(','));
+    check('прямой канал со своим ключом остаётся запасным', list.indexOf('own') > 0, list.join(','));
+  }
+
+  console.log('\n=== 84a. запрос по умолчанию идёт на прокси и без ключа ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiProxy: null,
+    aiPaidText: 'n = int(input())\nprint(n % 2 == 0)\n',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+      const call = st.aiPaidCalls[0];
+      check('запрос ушёл на прокси из скрипта',
+        !!call && call.url.indexOf('script.google.com') >= 0,
+        call ? call.url : 'запроса нет');
+      check('ключа в запросе нет', !call || !call.auth,
+        String((call || {}).auth || 'нет — и это правильно'));
+      check('решение пришло', /n % 2 == 0/.test(aiFeedText(win, st)),
+        aiFeedText(win, st).slice(0, 80));
+    }
+  });
+
+  console.log('\n=== 84b. прокси можно выключить и вернуться к прямому каналу ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 9000, cmMode: 'text/x-python',
+    aiProxy: '',
+    aiPaidText: 'ok',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 3000));
+      const call = st.aiPaidCalls[0];
+      check('при выключенном прокси идём напрямую',
+        !!call && call.url.indexOf('script.google.com') < 0,
+        call ? call.url : 'запроса нет');
+      check('и ключ снова уходит заголовком', !!call && /^Bearer /.test(String(call.auth)),
+        String((call || {}).auth || 'нет'));
     }
   });
 
