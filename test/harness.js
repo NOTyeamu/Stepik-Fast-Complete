@@ -1581,10 +1581,15 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       await new Promise((r) => setTimeout(r, 250));
       st.menu['✨ ИИ: решить текущий шаг']();
       await new Promise((r) => setTimeout(r, 500));
-      check('второй запрос не ушёл — сработала пауза', st.aiPaidCalls.length === 1,
+      check('второй запрос не ушёл мгновенно — сработала пауза', st.aiPaidCalls.length === 1,
         'запросов: ' + st.aiPaidCalls.length);
-      const status = statusText(win);
-      check('сказано, сколько подождать', /подожди \d+ с|лимит/.test(status), status);
+      /* Раньше скрипт в этом случае ОТКАЗЫВАЛСЯ спрашивать, и человек видел
+         «подожди 0 с» и пустой блок. Теперь показывает «думает» и пережидает. */
+      check('человек видит, что работа идёт, а не пустоту',
+        /пишет решение|думает/i.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 80));
+      const second = await until(() => st.aiPaidCalls.length > 1, 5000);
+      check('после паузы запрос всё-таки ушёл', second,
+        'запросов: ' + st.aiPaidCalls.length);
     }
   });
 
@@ -3438,33 +3443,33 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
   console.log('\n=== 79. ключ не лежит в скрипте, адрес не подсказан ===');
   {
     const probe = probeSandbox(QUIZ_PLUGIN_HTML,
-      ['aiKey', 'aiEndpoint', 'aiChannels', 'aiUsingBuiltInKey'],
+      ['aiKey', 'aiEndpoint', 'aiChannels'],
       `https://stepik.org/lesson/${LESSON}/step/8`);
     const key = probe.aiKey();
     const url = probe.aiEndpoint();
-    const channels = probe.aiChannels().length;
-    const shared = probe.aiUsingBuiltInKey();
+    const channels = probe.aiChannels().map((c) => c.id);
     probe.close();
-    /* Сам ключ не печатаем — проверяем только форму: что он есть и похож на ключ */
-    check('без настройки скрипт всё равно умеет ходить в ИИ',
-      typeof key === 'string' && key.length > 20 && key.indexOf('sk-') === 0,
-      'длина ' + String(key).length);
-    check('и это именно общий ключ, а не свой', shared, 'считается своим');
-    check('каналы доступны сразу, без настройки', channels >= 1, 'каналов: ' + channels);
-    check('адрес собирается правильно',
+    /* Ключа в скрипте нет вовсе: без настройки ИИ работает через прокси, и
+       в браузере ключа не появляется.                                        */
+    check('встроенного ключа нет', key === '', JSON.stringify(key));
+    check('без настройки ИИ всё равно работает', channels.length > 0, channels.join(','));
+    check('и работает именно через прокси', channels[0] === 'proxy', channels.join(','));
+    check('прямого канала без своего ключа нет', channels.indexOf('own') < 0, channels.join(','));
+    check('адрес канала собирается правильно',
       /^https:\/\/[a-z.]+\/v1\/chat\/completions$/.test(url), url);
   }
 
   console.log('\n=== 79a. свой ключ важнее общего, пустое поле выключает ИИ ===');
   {
-    const mine = probeSandbox(QUIZ_PLUGIN_HTML, ['aiKey', 'aiUsingBuiltInKey', 'aiErrorText'],
+    const mine = probeSandbox(QUIZ_PLUGIN_HTML, ['aiKey', 'aiChannels', 'aiErrorText'],
       `https://stepik.org/lesson/${LESSON}/step/8`, { aiKey: 'sk-moy-klyuch' });
     const own = mine.aiKey();
-    const ownShared = mine.aiUsingBuiltInKey();
+    const ownCh = mine.aiChannels().map((c) => c.id);
     const ownMsg = mine.aiErrorText(429);
     mine.close();
-    check('взят свой ключ, а не общий', own === 'sk-moy-klyuch', 'взят не свой');
-    check('про общий ключ в этом случае не говорим', !ownShared, 'считается общим');
+    check('взят свой ключ', own === 'sk-moy-klyuch', 'взят не свой');
+    check('со своим ключом появляется прямой канал', ownCh.indexOf('own') >= 0, ownCh.join(','));
+    check('прокси при этом остаётся', ownCh.indexOf('proxy') >= 0, ownCh.join(','));
     check('сообщение про лимит без «общего ключа»', !/общий ключ/.test(ownMsg), ownMsg);
 
     /* Пустой ключ убирает прямой канал, но прокси продолжает работать: это два
@@ -3485,17 +3490,23 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
     check('ключ и прокси убраны — ИИ выключен совсем', noCh === 0, 'каналов: ' + noCh);
   }
 
-  console.log('\n=== 79b. общий ключ упёрся в лимит — сказано внятно ===');
+  console.log('\n=== 79b. лимит объяснён внятно и с подсказкой ===');
   {
     const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['aiErrorText'],
       `https://stepik.org/lesson/${LESSON}/step/8`);
     const m402 = probe.aiErrorText(402);
     const m429 = probe.aiErrorText(429);
+    const m401 = probe.aiErrorText(401);
     probe.close();
-    check('про 402 сказано про общий ключ и что делать',
-      /общий ключ/.test(m402) && /Настройки ИИ/.test(m402), m402);
-    check('про 429 сказано про общий ключ и что делать',
-      /общий ключ/.test(m429) && /Настройки ИИ/.test(m429), m429);
+    check('про 402 сказано прямо', /402/.test(m402), m402);
+    check('про 429 подсказано, что делать', /429/.test(m429) && /ключ/.test(m429), m429);
+    check('без своего ключа про 401 сказано коротко', /401/.test(m401), m401);
+    const ownProbe = probeSandbox(QUIZ_PLUGIN_HTML, ['aiErrorText'],
+      `https://stepik.org/lesson/${LESSON}/step/8`, { aiKey: 'sk-moy' });
+    const own401 = ownProbe.aiErrorText(401);
+    ownProbe.close();
+    check('со своим ключом сказано, где его проверить',
+      /Настройки ИИ/.test(own401), own401);
   }
 
   {
@@ -3702,7 +3713,8 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       'длина ' + String(url).length);
     check('через прокси ходим сразу, без настройки', on, 'прокси выключен');
     check('прокси идёт первым каналом', list[0] === 'proxy', list.join(','));
-    check('прямой канал со своим ключом остаётся запасным', list.indexOf('own') > 0, list.join(','));
+    /* Прямого канала без своего ключа нет: ключа в скрипте больше не лежит. */
+    check('прямого канала без своего ключа нет', list.indexOf('own') < 0, list.join(','));
   }
 
   console.log('\n=== 84a. запрос по умолчанию идёт на прокси и без ключа ===');
