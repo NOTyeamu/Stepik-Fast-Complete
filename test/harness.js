@@ -175,7 +175,11 @@ function run({ url, store, submissions, html, storeDown, emptyLessonSteps, token
       storage: { writeToken: token === undefined ? 'github_pat_11TEST' : token }
     };
     if (job) state.storage.job = JSON.stringify(job);
-    if (aiKey !== undefined) state.storage.aiKey = aiKey;
+    /* Встроенного ключа в скрипте больше нет — он убран, чтобы не лежать
+       в публичном репозитории. Поэтому ключ для сценариев задаём явно:
+       без него канал выключен, и это правильно. Сценарий может передать
+       aiKey: '' — так проверяется «ключа нет».                                */
+    state.storage.aiKey = aiKey === undefined ? 'sk-test-key' : aiKey;
     /* выбранная в панели модель тоже живёт в хранилище */
     if (aiModel !== undefined) state.storage.aiModel = aiModel;
     /* Теорию урока скрипт запоминает, пока её читают, и достаёт на задании.
@@ -3402,6 +3406,137 @@ const THEORY_ONLY_HTML = `<!doctype html><html><body>
       check('ответ сохранён с расширением .txt', /\.txt$/.test(name), name || 'ничего не ушло');
       check('и в хранилище именно ответ', (st.inbox[name] || '').trim() === 'bool',
         JSON.stringify(st.inbox[name] || ''));
+    }
+  });
+
+  /* --- 79. ключа и адреса в исходнике нет -------------------------------- */
+  console.log('\n=== 79. ключ не лежит в скрипте, адрес не подсказан ===');
+  {
+    const probe = probeSandbox(QUIZ_PLUGIN_HTML, ['aiKey', 'aiEndpoint', 'aiChannels'],
+      `https://stepik.org/lesson/${LESSON}/step/8`);
+    const key = probe.aiKey();
+    const url = probe.aiEndpoint();
+    const channels = probe.aiChannels().length;
+    probe.close();
+    check('без настроек ключа нет', key === '', JSON.stringify(key));
+    check('без ключа канал выключен', channels === 0, 'каналов: ' + channels);
+    check('адрес всё же собирается правильно',
+      /^https:\/\/[a-z.]+\/v1\/chat\/completions$/.test(url), url);
+  }
+
+  {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'stepik-gist-sync.user.js'), 'utf8');
+    check('в скрипте нет ключа вида sk-…', !/sk-[0-9a-f]{20,}/i.test(src),
+      (src.match(/sk-[0-9a-f]{8,}/i) || [''])[0]);
+    check('в скрипте нет адреса канала целиком',
+      src.indexOf('api.reformboss.com/v1') < 0, 'адрес лежит открытым текстом');
+    check('в скрипте нет встроенных «кусков» ключа',
+      !/DEF_AI_CHUNKS|DEF_AI_KEY/.test(src), 'остались встроенные ключи');
+    check('в подсказке настроек нет адреса',
+      !/prompt\([^)]*reformboss/i.test(src), 'адрес в тексте диалога');
+    /* ключ не подставляется в поле ввода: иначе он виден на экране */
+    check('ключ не подставляется в диалог настроек',
+      !/cfg\.aiKey \|\| aiKey\(\)/.test(src), 'ключ всё ещё подставляется');
+  }
+
+  /* --- 80. квадратики: отмечаем только нужные ----------------------------- */
+  console.log('\n=== 80. в тесте с несколькими ответами отмечаются только нужные ===');
+  {
+    const probe = probeSandbox(CHOICE_CHECK_HTML, ['writeChoice'],
+      `https://stepik.org/lesson/${LESSON}/step/2`);
+    const state = () => Array.from(probe.window.document.querySelectorAll('input[type=checkbox]'))
+      .map((i) => i.checked);
+    probe.writeChoice({ ids: ['302'], answers: ['второй'] });
+    const one = state();
+    probe.writeChoice({ ids: ['301', '303'], answers: ['первый', 'третий'] });
+    const two = state();
+    probe.writeChoice({ ids: ['303'], answers: ['третий'] });
+    const three = state();
+    probe.close();
+    check('отмечен ровно один из трёх', one.join(',') === 'false,true,false', one.join(','));
+    check('переключение на два других работает', two.join(',') === 'true,false,true', two.join(','));
+    check('лишние галочки снимаются', three.join(',') === 'false,false,true', three.join(','));
+  }
+
+  /* --- 81. после сброса можно спросить заново прямо из блока -------------- */
+  console.log('\n=== 81. после сброса «Спросить ИИ» работает и индикатор в чате ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/8?unit=1818966`,
+    store: {}, submissions: [], html: QUIZ_PLUGIN_HTML, waitMs: 14000, cmMode: 'text/x-python',
+    aiDelay: 3000,
+    aiPaidQueue: [
+      'print(первый_ответ)\\n',
+      'print(второй_ответ)\\n'
+    ],
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 5000));
+      check('первый ответ получен', /первый_ответ/.test(aiFeedText(win, st)),
+        aiFeedText(win, st).slice(0, 80));
+
+      const root = win.document.querySelector('#sgx-ai-root');
+      const ask = root && root.querySelector('#sgx-ai-ask');
+      check('в блоке есть кнопка «Спросить ИИ»', !!ask, 'кнопки нет');
+
+      root.querySelector('#sgx-ai-reset').click();
+      await new Promise((r) => setTimeout(r, 400));
+      check('после сброса блок открыт', root.classList.contains('on'), root.className);
+      check('после сброса кнопка снова зовёт спрашивать',
+        /Спросить ИИ/.test(ask.textContent), ask.textContent);
+
+      const before = st.aiPaidCalls.length;
+      ask.click();
+      await new Promise((r) => setTimeout(r, 900));
+      /* пока модель думает, в чате должна быть строка «думает» */
+      check('индикатор «думает» появился в чате',
+        !!win.document.querySelector('#sgx-ai-log .sgx-ai-think'),
+        aiFeedText(win, st).slice(0, 100));
+      check('в чате сказано, чем занят ИИ',
+        /пишет решение/i.test(aiFeedText(win, st)), aiFeedText(win, st).slice(0, 100));
+
+      await new Promise((r) => setTimeout(r, 4000));
+      check('сделан новый запрос', st.aiPaidCalls.length > before,
+        st.aiPaidCalls.length + ' против ' + before);
+      check('и пришёл новый ответ', /второй_ответ/.test(aiFeedText(win, st)),
+        aiFeedText(win, st).slice(0, 100));
+      check('индикатор убран после ответа',
+        !win.document.querySelector('#sgx-ai-log .sgx-ai-think'), 'остался висеть');
+    }
+  });
+
+  /* --- 82. метки вариантов: зелёные, заполнение по центру ----------------- */
+  console.log('\n=== 82. метки вариантов зелёные, блок как у кода ===');
+  await run({
+    url: `https://stepik.org/lesson/${LESSON}/step/2?unit=1818966`,
+    store: {}, submissions: [], html: CHOICE_ONLY_HTML, waitMs: 8000,
+    aiPaidText: 'static int Multiply(int a, int b)',
+    afterRun: async (win, st) => {
+      st.menu['✨ ИИ: решить текущий шаг']();
+      await new Promise((r) => setTimeout(r, 4000));
+      const css = st.css || '';
+      const rule = (sel) => {
+        const i = css.indexOf(sel + '{');
+        return i < 0 ? '' : css.slice(i, css.indexOf('}', i) + 1);
+      };
+      const opts = rule('#sgx-ai-panel .sgx-ai-opts');
+      const code = rule('#sgx-ai-panel .sgx-ai-code');
+      const mark = rule('#sgx-ai-panel .sgx-ai-mark');
+      check('блок вариантов оформлен как блок кода',
+        /background:#F7F7F6/.test(opts) && /background:#F7F7F6/.test(code),
+        opts || 'правила нет');
+      check('у блока вариантов та же рамка, что у кода',
+        /border:1px solid #ECECEA/.test(opts), opts || '—');
+      check('у блока вариантов то же скругление',
+        /border-radius:var\(--sgx-r-sm\)/.test(opts), opts || '—');
+      check('рамка метки зелёная', /#A9C6A9|#2E7D32/.test(mark), mark || '—');
+      const on = rule('#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark');
+      check('выбранная метка зелёная', /#2E7D32/.test(on), on || '—');
+      const circle = rule('#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.circle::after');
+      const box = rule('#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.box::after');
+      check('заполнение круга стоит по центру, а не заливает целиком',
+        /inset:4px/.test(circle), circle || '—');
+      check('заполнение квадрата тоже по центру', /inset:4px/.test(box), box || '—');
+      check('заполнение зелёное', /background:#2E7D32/.test(circle), circle || '—');
     }
   });
 

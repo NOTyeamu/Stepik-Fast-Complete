@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.11.0
-// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам: показывает варианты в чате кружками или квадратами, отмечает нужные, а при отказе проверки берёт другой вариант. Задания со свободным ответом в поле тоже решаются. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
+// @version      6.12.0
+// @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам: показывает варианты в чате кружками или квадратами, отмечает нужные, а при отказе проверки берёт другой вариант. Задания со свободным ответом в поле тоже решаются. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Ключ доступа к ИИ в скрипте не хранится — его вписывают один раз в настройках, и он остаётся только на своём компьютере. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
 // @match        *://*.stepik.org/*
@@ -64,7 +64,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.11.0';
+  var VERSION = '6.12.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -81,12 +81,13 @@
      (подробности в README, раздел «Решение от ИИ»). Полностью снять вопрос можно
      так: очистить поле в меню → «🔑 Настройки ИИ» — тогда ИИ выключается совсем.
      Две копии, чтобы откат не оставил без ИИ вовсе. */
-  var DEF_AI_CHUNKS = [
-    ['c2stOWE0', 'ZWFmMmFi', 'YjY3MzVl', 'OWI1ZDY3', 'ZGVjM2Vk', 'Zjk5OWMw', 'YTExZjY2', 'MDQxZGZi', 'NjM1'],
-    ['c2stNGVi', 'ZTc4ZmM3', 'M2FiZDU1', 'YzdjZmNi', 'NzQ2ZTkz', 'YTNmNGFi', 'Njc4ZDg5', 'ZDQ5N2Fh', 'YmU5MQ']
-  ];
-  var DEF_AI_KEY = 0;
-
+  /* Встроенного ключа здесь БОЛЬШЕ НЕТ и быть не должно.
+     Раньше ключ лежал в исходнике закодированным, и это было плохо по двум
+     причинам: репозиторий публичный, то есть ключом мог воспользоваться кто
+     угодно, и он же подставлялся в поле ввода в настройках — то есть оказывался
+     на виду. Теперь ключ только свой: человек вписывает его один раз в
+     «🔑 Настройки ИИ», он хранится в настройках скрипта у него на машине и
+     в репозиторий не попадает никогда.                                        */
   /* ключ хранилища отдельный от старых версий: там в 'token' лежал токен гиста */
   var cfg = {
     token: GM_getValue('writeToken', DEF_TOKEN),
@@ -700,7 +701,10 @@
       var on = wantIds.indexOf(String(inp.value)) >= 0 || (wantTxt.length && wantTxt.indexOf(txt) >= 0);
       if (on) hits++;
       if (inp.checked === on) return;
-      if (on || inp.type === 'checkbox') inp.click();
+      /* Приводим состояние к нужному. Раньше здесь было «или это квадратик» —
+         и на тесте с несколькими ответами скрипт отмечал ВСЕ квадратики:
+         каждый лишний клик не снимал галочку, а ставил её.                     */
+      inp.click();
     });
     if (!hits) return { ok: false, error: 'сохранённые варианты не найдены в списке' };
     return { ok: true, via: 'варианты', hits: hits };
@@ -970,21 +974,33 @@
     '#sgx-ai-panel .sgx-ai-repline.bad{color:#B3261E;font-weight:600}',
     '#sgx-ai-panel .sgx-ai-repline.ok{color:#2C6B3C}',
     '#sgx-ai-panel .sgx-ai-repline.note{color:#6B6A67}',
-    /* варианты теста в чате: круг — один ответ, квадрат — несколько */
-    '#sgx-ai-panel .sgx-ai-opts{display:flex;flex-direction:column;gap:6px;padding:2px 0}',
+    /* варианты теста в чате: та же плашка, что и у кода, метки зелёные —
+       круг, если ответ один, квадрат, если верных несколько. Заполнение
+       стоит по центру, а не заливает метку целиком.                            */
+    '#sgx-ai-panel .sgx-ai-opts{display:flex;flex-direction:column;gap:var(--sgx-s2);',
+    'padding:var(--sgx-s3) var(--sgx-s4);border-radius:var(--sgx-r-sm);background:#F7F7F6;',
+    'border:1px solid #ECECEA}',
     '#sgx-ai-panel .sgx-ai-opt{display:flex;align-items:flex-start;gap:var(--sgx-s2);',
     'font-size:var(--sgx-f-sm);color:#4B4A47}',
-    '#sgx-ai-panel .sgx-ai-mark{flex:0 0 auto;position:relative;width:16px;height:16px;margin-top:2px;',
-    'border:2px solid #B9B7B2;background:#fff}',
+    '#sgx-ai-panel .sgx-ai-mark{flex:0 0 auto;position:relative;width:18px;height:18px;margin-top:1px;',
+    'border:2px solid #A9C6A9;background:#fff}',
     '#sgx-ai-panel .sgx-ai-mark.circle{border-radius:50%}',
-    '#sgx-ai-panel .sgx-ai-mark.box{border-radius:3px}',
+    '#sgx-ai-panel .sgx-ai-mark.box{border-radius:4px}',
     '#sgx-ai-panel .sgx-ai-opt.on{color:#1F1D1B;font-weight:600}',
-    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark{border-color:#2F7CE0}',
-    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.circle::after{content:"";position:absolute;inset:2px;',
-    'border-radius:50%;background:#2F7CE0}',
-    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.box::after{content:"";position:absolute;inset:2px;',
-    'border-radius:1px;background:#2F7CE0}',
+    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark{border-color:#2E7D32}',
+    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.circle::after{content:"";position:absolute;inset:4px;',
+    'border-radius:50%;background:#2E7D32}',
+    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.box::after{content:"";position:absolute;inset:4px;',
+    'border-radius:2px;background:#2E7D32}',
     '#sgx-ai-panel .sgx-ai-optnote{margin-top:2px;font-size:var(--sgx-f-xs);color:var(--sgx-fg-dim)}',
+    /* нижняя полоса блока: главное действие — спросить ИИ */
+    '#sgx-ai-panel .sgx-ai-foot{display:flex;padding:var(--sgx-s3) var(--sgx-s4);',
+    'border-top:1px solid var(--sgx-bd);background:#fff}',
+    '#sgx-ai-panel .sgx-ai-ask{flex:1 1 auto;height:40px;border:0;border-radius:var(--sgx-r-sm);',
+    'background:#2F7CE0;color:#fff;font-family:inherit;font-size:var(--sgx-f-sm);font-weight:600;',
+    'cursor:pointer}',
+    '#sgx-ai-panel .sgx-ai-ask:hover{background:#2769C4}',
+    '#sgx-ai-panel .sgx-ai-ask[disabled]{background:#C9D6E6;cursor:default}',
     /* --- выбор модели: свой список, а не родной select ---
        Родной <select> в списке значков не покажет, а человек просил значок модели
        слева и «ум» справа. Поэтому это кнопка + всплывающий список.            */
@@ -1970,7 +1986,16 @@ async function jobCollect(ctx, target) {
      ИИ ничего не вставляет и не отправляет сам — показывает текст решения,
      чтобы человек решил, пользоваться им или нет. */
 
-  /* Канал один: свой ключ (api.reformboss.com/v1). Модель выбрана замером —
+  /* Адрес канала держим закодированным, чтобы он не лежал в исходнике одной
+     строкой и не находился поиском. Это НЕ защита — адрес всё равно виден
+     в сетевой панели браузера, — но и подсказывать его в тексте не нужно.      */
+  function aiEndpoint() {
+    var host = '';
+    try { host = b64decode('YXBpLnJlZm9ybWJvc3MuY29t'); } catch (e) { host = ''; }
+    return 'https://' + host + '/v1/chat/completions';
+  }
+
+  /* Канал один: свой ключ. Модель выбрана замером —
      glm-5.3-flash отвечает около 5 с, а deepseek-v4-flash около 30 с: тот
      reasoning-модель и жжёт бюджет на размышления. Бесплатный канал
      (text.pollinations.ai) убран: анонимный тариф отвечал 402 через раз.    */
@@ -2054,7 +2079,7 @@ async function jobCollect(ctx, target) {
   var AI_CHANNELS = [
     {
       id: 'own', label: 'свой ключ', needKey: true,
-      url: 'https://api.reformboss.com/v1/chat/completions',
+      url: aiEndpoint(),
       models: AI_MODELS.map(function (m) { return m.id; }),
       headers: function (key) { return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }; },
       body: function (model, system, user) {
@@ -2097,9 +2122,7 @@ async function jobCollect(ctx, target) {
 
   function aiKey() {
     if (aiKeyCleared()) return '';
-    if (cfg.aiKey && cfg.aiKey.length) return cfg.aiKey;
-    var ch = DEF_AI_CHUNKS[DEF_AI_KEY % DEF_AI_CHUNKS.length];
-    try { return b64decode(ch.join('')); } catch (e) { return ''; }
+    return (cfg.aiKey && cfg.aiKey.length) ? cfg.aiKey : '';
   }
 
   function setAiKey(val) { cfg.aiKey = val; GM_setValue('aiKey', val); }
@@ -3834,8 +3857,19 @@ async function jobCollect(ctx, target) {
       icon('trash', 18) + '</button>',
       '</div></div>',
       '<div class="sgx-ai-log" id="sgx-ai-log"></div>',
+      /* Кнопка нужна прямо здесь: после «Сбросить» спросить было нечем — скоба
+         показывается только когда ответ уже есть, а меню Tampermonkey далеко.  */
+      '<div class="sgx-ai-foot">',
+      '<button class="sgx-ai-ask" id="sgx-ai-ask" type="button">Спросить ИИ</button>',
+      '</div>',
       '</div>'
     ].join('');
+
+    root.querySelector('#sgx-ai-ask').addEventListener('click', function () {
+      var ctx = stepContext();
+      var again = !!(aiAnswer && ctx && aiAnswer.key === ctx.key);
+      askAi({ fixed: again });
+    });
 
     /* Сброс чистит переписку, но НЕ закрывает блок. Раньше он прятал блок, и
        вернуть его было нечем: скоба показывается только когда есть ответ, а
@@ -3928,7 +3962,21 @@ async function jobCollect(ctx, target) {
       li.classList.toggle('on', li.getAttribute('data-model') === want);
     });
     wireModelIcons(root || document);
+    aiSyncAskButton(root);
     return box;
+  }
+
+  /* Надпись на кнопке зависит от того, есть ли уже решение для шага: спрашивать
+     «заново» и спрашивать «с нуля» — разные вещи, и человек должен видеть, что
+     произойдёт. Заодно гасим кнопку, пока запрос в полёте.                      */
+  function aiSyncAskButton(root) {
+    var btn = (root || aiRootEl() || document).querySelector('#sgx-ai-ask');
+    if (!btn) return;
+    var ctx = stepContext();
+    var again = !!(aiAnswer && ctx && aiAnswer.key === ctx.key);
+    var label = again ? 'Спросить заново' : 'Спросить ИИ';
+    if (btn.textContent !== label) btn.textContent = label;
+    btn.disabled = !!aiBusy;
   }
 
   /* Куда класть блок ИИ. Ищем место внутри карточки задания, вплотную к редактору
@@ -4477,13 +4525,25 @@ async function jobCollect(ctx, target) {
     });
 
     GM_registerMenuCommand('🔑 Настройки ИИ', function () {
-      var k = prompt('Ключ канала ИИ (api.reformboss.com).\n' +
-        'Пусто — ИИ выключается совсем.\n' +
-        'Внимание: ключ, вписанный сюда, виден в настройках скрипта у того, кто его поставил.',
-        cfg.aiKey || aiKey());
+      /* Ключ в поле НЕ подставляем: раньше он показывался прямо в диалоге, и это
+         было видно на экране. Теперь только говорим, что ключ уже есть.        */
+      var has = !!aiKey();
+      var k = prompt('Ключ доступа к ИИ.\n' +
+        (has
+          ? 'Ключ уже сохранён. Введи новый, чтобы заменить, или оставь поле пустым\n' +
+            'и подтверди — тогда ключ будет убран и ИИ выключится совсем.\n'
+          : 'Пусто — ИИ выключен.\n') +
+        'Ключ хранится только в настройках скрипта на твоём компьютере\n' +
+        'и в репозиторий не попадает.', '');
       if (k === null) return;
-      setAiKey(k.trim());
-      toast(k.trim() ? '✓ Ключ сохранён' : '✓ Ключ убран — ИИ выключен');
+      var val = String(k).trim();
+      if (!val && has) {
+        var sure = true;
+        try { sure = confirm('Убрать сохранённый ключ? ИИ выключится совсем.'); } catch (e) { sure = true; }
+        if (!sure) return;
+      }
+      setAiKey(val);
+      toast(val ? '✓ Ключ сохранён' : '✓ Ключ убран — ИИ выключен');
     });
 
     GM_registerMenuCommand('🔄 Обновить список ответов', function () {
