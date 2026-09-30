@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.16.0
+// @version      6.17.0
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам: показывает варианты в чате кружками или квадратами, отмечает нужные, а при отказе проверки берёт другой вариант. Задания со свободным ответом в поле тоже решаются. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Запросы идут через прокси, а ключ доступа живёт только на сервере — в браузер он не попадает вообще. Расход ограничен суточным лимитом. Свой ключ или свой прокси можно вписать в настройках. Если общий упрётся в лимит, скрипт скажет об этом прямо. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -65,7 +65,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.16.0';
+  var VERSION = '6.17.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -988,7 +988,10 @@
     '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark{border-color:#2E7D32}',
     '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.circle::after{content:"";position:absolute;inset:4px;',
     'border-radius:50%;background:#2E7D32}',
-    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.box::after{content:"";position:absolute;inset:4px;',
+    /* Квадрат заливаем ЦЕЛИКОМ: маленький квадратик внутри читался как «не
+       нажато». Круг оставляем точкой по центру — там так и должно быть.      */
+    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.box{background:#2E7D32;border-color:#2E7D32}',
+    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.box::after{content:"";position:absolute;inset:0;',
     'border-radius:2px;background:#2E7D32}',
     '#sgx-ai-panel .sgx-ai-optnote{margin-top:2px;font-size:var(--sgx-f-xs);color:var(--sgx-fg-dim)}',
     /* нижняя полоса блока: главное действие — спросить ИИ */
@@ -1143,7 +1146,17 @@
       insertSaved(ctx).catch(function (err) { toast('⚠ ' + err.message, true); });
     });
     chip.querySelector('.no').addEventListener('click', function () { hideChip(true); });
-    chip.querySelector('.sgx-act.ai').addEventListener('click', function () { askAi(); });
+    chip.querySelector('.sgx-act.ai').addEventListener('click', function () {
+      var ctx = stepContext();
+      /* Решение для шага уже есть — значит человек хочет ОТКРЫТЬ блок (например,
+         после «Закрыть окно»), а не потратить ещё один запрос.               */
+      if (aiAnswer && ctx && aiAnswer.key === ctx.key) {
+        aiShow(true);
+        aiSlot();
+        return;
+      }
+      askAi();
+    });
     return chip;
   }
 
@@ -2608,7 +2621,12 @@ async function jobCollect(ctx, target) {
         'нумерации. Если подходит несколько вариантов (галочки, а не кружки) — верни ' +
         'каждый с новой строки. Никакого кода писать не нужно.\n' +
         '1. Выбирай по смыслу вопроса, а не по длине варианта.\n' +
-        '2. Если в уроке ещё не было сложных конструкций — выбирай самый простой вариант.';
+        '2. Если в уроке ещё не было сложных конструкций — выбирай самый простой вариант.\n' +
+        '3. ВЫБИРАЙ ТОЛЬКО ТО, ЧТО ПОДХОДИТ. Не перечисляй все варианты подряд: ' +
+        'неправильных в тесте обычно больше, чем правильных. Если подходит один — ' +
+        'верни один. Никогда не возвращай весь список.\n' +
+        '4. Сначала мысленно отбрось те варианты, которые не подходят, и только ' +
+        'потом выбирай из оставшихся.';
     }
     return 'Реши задание со Stepik. Верни ТОЛЬКО ответ: без пояснений, без markdown, ' +
       'без ``` и без строки с названием языка. Код — целиком, одним куском. ' +
@@ -3020,6 +3038,28 @@ async function jobCollect(ctx, target) {
         return;
       }
 
+      /* Модель вернула ВЕСЬ список вариантов — это не ответ, а пересказ задания.
+         Отмечать всё подряд бессмысленно: тест провалится гарантированно.
+         Переспрашиваем один раз с прямым указанием.                            */
+      if (kind === 'choice' && choiceLooksLikeAll(got.text)) {
+        aiLogAdd('Похоже, я перечислил все варианты. Уточню, какие подходят.', 'sys');
+        var strict = aiUserFor(ctx) +
+          '\n\nВНИМАНИЕ: в прошлый раз ты вернул ВСЕ варианты подряд. Это неверно — ' +
+          'неправильных в тесте обычно больше, чем правильных. Разбери каждый вариант ' +
+          'по отдельности и верни ТОЛЬКО те, что действительно подходят, каждый с новой строки.';
+        try {
+          got = await aiCall(aiSystem('choice'), strict, { retry: false });
+        } catch (e) { log('уточняющий запрос не удался: ' + (e && e.message)); }
+        if (choiceLooksLikeAll(got.text)) {
+          /* Всё равно весь список — тогда лучше не отмечать ничего, чем отметить
+             заведомо неправильное: отправка всё равно провалится.               */
+          dropThink(thinking);
+          aiLogAdd('Не смог выбрать точно — отметь вариант сам, пожалуйста. ' +
+            'Так бывает на вопросах, где надо понять смысл, а не найти ответ по словам.', 'sys');
+          return;
+        }
+      }
+
       /* Снимаем ограждения сразу: и в ленте, и при копировании, и при вставке
          в редактор человек должен видеть чистый ответ, а не ```python … ```. */
       var clean = stripFences(got.text) || got.text;
@@ -3027,6 +3067,9 @@ async function jobCollect(ctx, target) {
         key: ctx.key, text: clean, at: Date.now(), model: got.model,
         kind: kind, lang: stepLanguage(), truncated: !!got.truncated
       };
+      /* Новый ответ — новые попытки правки: лимит правок считается на ответ,
+         а не на шаг, иначе после двух неудач скрипт молчал бы до перезагрузки. */
+      delete aiFixTried[ctx.key];
       dropThink(thinking);
       saveAi();
       renderPanel(true);
@@ -3159,23 +3202,73 @@ async function jobCollect(ctx, target) {
       .filter(function (i) { return /radio|checkbox/.test(i.type) && !i.disabled; });
     if (!inputs.length) return null;
 
-    var answers = [];
-    var ids = [];
+    /* Ответ модели разбираем ПО СТРОКАМ. Раньше вариант искался подстрокой во
+       всём ответе — и если модель что-то объясняла, под условие подходили ВСЕ
+       варианты, а скрипт честно отмечал их все. Теперь строки разбираются
+       отдельно, и совпадение целой строки считается надёжным.                 */
+    var lines = body.split('\n').map(function (l) {
+      return norm(l).replace(/^[-*•·]\s*/, '').replace(/^\d+\s*[).:—-]\s*/, '').trim();
+    }).filter(function (l) { return l.length > 1; });
+
+    var opts = [];
     inputs.forEach(function (inp, idx) {
       var label = inp.closest('label') || inp.parentElement;
       var txt = norm((label || {}).textContent || '');
-      if (!txt) return;
-      /* по тексту варианта */
-      if (body.indexOf(txt) >= 0) { answers.push(txt); ids.push(String(inp.value)); return; }
-      /* по номеру: «2) …», «2. …», «ответ: 2», «Вариант 4» и просто «4».
-         Раньше после цифры требовался знак препинания, и ответ «Правильный
-         вариант: 4» (номер в конце) не распознавался — модель выбирает верно,
-         а галочка не ставилась. Теперь знак или конец строки.                 */
-      var num = new RegExp('(?:^|[^\\d])' + (idx + 1) + '(?=\\s*(?:[).:—\\-−]|$))', 'm');
-      if (num.test(body)) { answers.push(txt); ids.push(String(inp.value)); }
+      if (txt) opts.push({ txt: txt, id: String(inp.value), n: idx + 1, inp: inp });
     });
-    if (!answers.length) return null;
-    return { kind: 'choice', answers: answers, ids: ids, source: 'ии' };
+
+    /* Сравниваем без учёта регистра: модель легко пишет вариант со строчной
+       буквы, вплетая его в фразу, и точное сравнение его теряло.             */
+    var lowLines = lines.map(function (l) { return l.toLowerCase(); });
+    var lowBody = body.toLowerCase();
+
+    /* 1. Целая строка ответа равна варианту — самое надёжное совпадение. */
+    var exact = opts.filter(function (o) {
+      return lowLines.indexOf(o.txt.toLowerCase()) >= 0;
+    });
+    if (exact.length) return pick(exact);
+
+    /* 2. Номер варианта: «2) …», «ответ: 2», «Вариант 4» и просто «4». */
+    var byNum = opts.filter(function (o) {
+      var re = new RegExp('(?:^|[^\\d])' + o.n + '(?=\\s*(?:[).:—\\-−]|$))', 'm');
+      return re.test(body);
+    });
+    if (byNum.length) return pick(byNum);
+
+    /* 3. Запасной путь — поиск по тексту. Если так совпадают ВСЕ варианты,
+       значит модель пересказала задание, а не выбрала ответ: отмечать всё
+       подряд заведомо неверно, поэтому лучше не отмечать ничего.             */
+    var byText = opts.filter(function (o) {
+      return lowBody.indexOf(o.txt.toLowerCase()) >= 0;
+    });
+    if (byText.length && byText.length < opts.length) return pick(byText);
+
+    return null;
+
+    function pick(list) {
+      return {
+        kind: 'choice',
+        answers: list.map(function (o) { return o.txt; }),
+        ids: list.map(function (o) { return o.id; }),
+        source: 'ии'
+      };
+    }
+  }
+
+  /* Выбраны ВСЕ варианты — так почти никогда не бывает, и это верный признак,
+     что модель перечислила список целиком вместо ответа. Нужно для проверки
+     и для повторного вопроса.                                                 */
+  function choiceLooksLikeAll(text) {
+    var all = choiceOptions();
+    if (all.length < 2) return false;
+    var lines = String(text || '').split('\n').map(function (l) {
+      return norm(l).replace(/^[-*•·]\s*/, '').replace(/^\d+\s*[).:—-]\s*/, '').trim().toLowerCase();
+    }).filter(function (l) { return l.length > 1; });
+    if (lines.length < 2) return false;
+    var hits = all.filter(function (o) {
+      return lines.indexOf(String(o.text).toLowerCase()) >= 0;
+    }).length;
+    return hits >= all.length;
   }
 
   /* После неудачной отправки Stepik убирает редактор и показывает разбор —
@@ -3249,7 +3342,12 @@ async function jobCollect(ctx, target) {
     var res;
     if (kind === 'choice') {
       var picked = choiceFromText(aiAnswer.text);
-      res = picked ? writeChoice(picked) : { ok: false, error: 'варианты не распознаны' };
+      if (!picked) {
+        aiLogAdd('Не разобрал, какой вариант выбран, — отметь сам, пожалуйста. ' +
+          'Так бывает на вопросах, где надо понять смысл, а не найти ответ по словам.', 'sys');
+        return { skipped: 'варианты не распознаны' };
+      }
+      res = writeChoice(picked);
       if (!res || !res.ok) {
         aiLogAdd('Отметить вариант не получилось: ' +
           ((res && res.error) || 'неизвестная причина') + '.', 'sys');
@@ -3993,8 +4091,13 @@ async function jobCollect(ctx, target) {
       '</button>',
       '<ul class="sgx-ai-models" id="sgx-ai-models"></ul>',
       '</div>',
-      '<button class="sgx-ai-tool" id="sgx-ai-reset" type="button" title="Сбросить">' +
+      '<button class="sgx-ai-tool" id="sgx-ai-reset" type="button" title="Очистить чат">' +
       icon('trash', 18) + '</button>',
+      /* Закрыть блок. Вернуть его можно кнопкой «ИИ» в скобе или меню
+         Tampermonkey — раньше закрывать было нечем, и блок занимал место,
+         пока не уйдёшь на другой шаг.                                          */
+      '<button class="sgx-ai-tool" id="sgx-ai-close" type="button" title="Закрыть окно">' +
+      icon('close', 18) + '</button>',
       '</div></div>',
       '<div class="sgx-ai-log" id="sgx-ai-log"></div>',
       /* Кнопка нужна прямо здесь: после «Сбросить» спросить было нечем — скоба
@@ -4004,6 +4107,11 @@ async function jobCollect(ctx, target) {
       '</div>',
       '</div>'
     ].join('');
+
+    root.querySelector('#sgx-ai-close').addEventListener('click', function () {
+      aiShow(false);
+      setStatus('ИИ: блок закрыт — вернуть можно кнопкой «ИИ» у задания');
+    });
 
     root.querySelector('#sgx-ai-ask').addEventListener('click', function () {
       var ctx = stepContext();
@@ -4429,7 +4537,8 @@ async function jobCollect(ctx, target) {
     } else if (aiAnswer && aiAnswer.key === ctx.key && !dismissed[ctx.key]) {
       /* решения в папке нет, зато его уже подсказал ИИ — предложим открыть */
       var t2 = insertTarget();
-      if (t2) showChip(t2, 'есть решение ИИ');
+      /* Кнопку «ИИ» показываем и здесь: ею блок возвращается после закрытия. */
+      if (t2) showChip(t2, 'есть решение ИИ', true);
       else hideChip();
     } else {
       hideChip();
