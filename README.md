@@ -5,7 +5,7 @@
 **Юзерскрипт для stepik.org.** Сам сохраняет зачтённые ответы, вставляет их одним нажатием
 и решает задания, которых ещё нет в общей папке.
 
-[![version](https://img.shields.io/badge/version-6.23.0-blue?style=flat-square)](stepik-gist-sync.user.js)
+[![version](https://img.shields.io/badge/version-6.24.0-blue?style=flat-square)](stepik-gist-sync.user.js)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-нужен-orange?style=flat-square)](https://www.tampermonkey.net/)
 [![stepik.org](https://img.shields.io/badge/stepik.org-работает-2ea44f?style=flat-square)](https://stepik.org)
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.23.0
+// @version      6.24.0
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам: показывает варианты в чате кружками или квадратами, отмечает нужные, а при отказе проверки берёт другой вариант. Задания со свободным ответом в поле тоже решаются. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Запросы идут через прокси, а ключ доступа живёт только на сервере — в браузер он не попадает вообще. Расход ограничен суточным лимитом. Свой ключ или свой прокси можно вписать в настройках. Если общий упрётся в лимит, скрипт скажет об этом прямо. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -65,7 +65,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.23.0';
+  var VERSION = '6.24.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -920,7 +920,11 @@
        Подсвеченный элемент «горит» — на него и намекаем.                       */
     '#sgx-tour{position:fixed;inset:0;z-index:2147483600;display:none}',
     '#sgx-tour.on{display:block}',
-    '#sgx-tour .sgx-tour-dim{position:absolute;inset:0;background:rgba(15,15,14,.62);',
+    /* Затемнение собирается из ЧЕТЫРЁХ полос вокруг цели, а не одним слоем:
+       одним слоем размывалось и то место, на которое показывает стрелка, —
+       человек видел мутное пятно вместо самой кнопки.                        */
+    '#sgx-tour .sgx-tour-dim{position:absolute;inset:0;pointer-events:none}',
+    '#sgx-tour .sgx-tour-dim i{position:absolute;display:block;background:rgba(15,15,14,.62);',
     'backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px)}',
     '#sgx-tour .sgx-tour-ring{position:absolute;border-radius:10px;pointer-events:none;',
     'box-shadow:0 0 0 3px rgba(255,214,102,.95),0 0 26px 10px rgba(255,196,0,.45);',
@@ -4722,7 +4726,7 @@ async function jobCollect(ctx, target) {
     box.classList.add('on');
     box.querySelector('.sgx-ask-go').addEventListener('click', function () {
       box.remove();
-      tourStart(0);
+      tourStart(0, 0);
     });
     box.querySelector('.sgx-ask-skip').addEventListener('click', function () {
       box.remove();
@@ -4733,7 +4737,45 @@ async function jobCollect(ctx, target) {
   /* Подсказка стоит по центру, а на нужный элемент показывает стрелка и
      подсветка. Элемента может не быть на этом шаге — тогда просто показываем
      текст без стрелки, а не ломаемся.                                        */
-  function tourStart(i) {
+  function rectOf(el) {
+    if (!el || !el.getBoundingClientRect) return null;
+    var r = el.getBoundingClientRect();
+    return (r && r.width && r.height) ? r : null;
+  }
+
+  /* Затемнение вокруг цели: четыре полосы, между ними — «окно», через которое
+     цель видна как есть. Без цели затемняем всё.                              */
+  function tourSpotlight(ov, r) {
+    var dim = ov.querySelector('#sgx-tour-dim');
+    if (!dim) return;
+    dim.innerHTML = '';
+    var W = window.innerWidth, H = window.innerHeight;
+    var parts;
+    if (!r) {
+      parts = [{ left: 0, top: 0, width: W, height: H }];
+    } else {
+      var pad = 8;
+      var x1 = Math.max(0, r.left - pad), y1 = Math.max(0, r.top - pad);
+      var x2 = Math.min(W, r.left + r.width + pad), y2 = Math.min(H, r.top + r.height + pad);
+      parts = [
+        { left: 0, top: 0, width: W, height: y1 },                 /* сверху */
+        { left: 0, top: y2, width: W, height: H - y2 },            /* снизу */
+        { left: 0, top: y1, width: x1, height: y2 - y1 },          /* слева */
+        { left: x2, top: y1, width: W - x2, height: y2 - y1 }      /* справа */
+      ];
+    }
+    parts.forEach(function (q) {
+      if (q.width <= 0 || q.height <= 0) return;
+      var i = document.createElement('i');
+      i.style.left = Math.round(q.left) + 'px';
+      i.style.top = Math.round(q.top) + 'px';
+      i.style.width = Math.round(q.width) + 'px';
+      i.style.height = Math.round(q.height) + 'px';
+      dim.appendChild(i);
+    });
+  }
+
+  function tourStart(i, tries) {
     var step = TOUR_STEPS[i];
     if (!step) { tourEnd(); return; }
 
@@ -4743,10 +4785,21 @@ async function jobCollect(ctx, target) {
     }
     var el0 = null;
     try { el0 = document.querySelector(step.target); } catch (e) { el0 = null; }
+    /* Панель и блок ИИ появляются не мгновенно — если места ещё нет, подождём
+       кадр и попробуем снова. Пара попыток, а не до бесконечности: у скрытого
+       элемента места не будет никогда, и знакомство зациклилось бы.           */
+    if (!el0 || !rectOf(el0)) {
+      if ((tries || 0) < 4) {
+        setTimeout(function () { tourStart(i, (tries || 0) + 1); }, 260);
+        return;
+      }
+      tourStart(i + 1, 0);            /* не дождались — шаг пропускаем */
+      return;
+    }
     if (!el0) {
       /* цели нет (например, у задания ещё нет готового ответа) — шаг пропускаем,
          чтобы не показывать карточку без стрелки */
-      tourStart(i + 1);
+      tourStart(i + 1, 0);
       return;
     }
 
@@ -4758,7 +4811,7 @@ async function jobCollect(ctx, target) {
       return '<i class="' + (k === i ? 'on' : '') + '"></i>';
     }).join('');
     ov.innerHTML = [
-      '<div class="sgx-tour-dim"></div>',
+      '<div class="sgx-tour-dim" id="sgx-tour-dim"></div>',
       '<div class="sgx-tour-ring" id="sgx-tour-ring" style="display:none"></div>',
       '<svg class="sgx-tour-arrow" id="sgx-tour-arrow" width="0" height="0"><path fill="none" ',
       'stroke="#FFD666" stroke-width="3" stroke-linecap="round" stroke-dasharray="7 6" d=""></path>',
@@ -4776,12 +4829,15 @@ async function jobCollect(ctx, target) {
     document.body.appendChild(ov);
     ov.classList.add('on');
 
-    ov.querySelector('.sgx-tour-next').addEventListener('click', function () { tourStart(i + 1); });
+    ov.querySelector('.sgx-tour-next').addEventListener('click', function () { tourStart(i + 1, 0); });
     ov.querySelector('.sgx-tour-skip').addEventListener('click', function () { tourEnd(); });
 
     /* Подсветка и стрелка: цель ищем каждый раз заново — вёрстка Stepik живая. */
     var el = null;
     try { el = document.querySelector(step.target); } catch (e) { el = null; }
+    var rEl = rectOf(el);
+    /* Затемнение кладём полосами вокруг цели, чтобы сама цель осталась чёткой. */
+    tourSpotlight(ov, rEl);
     if (el) {
       var r = el.getBoundingClientRect();
       if (r.width && r.height) {
@@ -4940,7 +4996,7 @@ async function jobCollect(ctx, target) {
          где что лежит.                                                       */
       openPanel(false, true);
       tourForget();
-      tourStart(0);
+      tourStart(0, 0);
     });
     panel.querySelector('#sgx-collect').addEventListener('click', function () { beginJob('collect'); });
     panel.querySelector('#sgx-stop').addEventListener('click', function () { stopJob('остановлено'); });
