@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.20.0
+// @version      6.21.0
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам: показывает варианты в чате кружками или квадратами, отмечает нужные, а при отказе проверки берёт другой вариант. Задания со свободным ответом в поле тоже решаются. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Запросы идут через прокси, а ключ доступа живёт только на сервере — в браузер он не попадает вообще. Расход ограничен суточным лимитом. Свой ключ или свой прокси можно вписать в настройках. Если общий упрётся в лимит, скрипт скажет об этом прямо. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -65,7 +65,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.20.0';
+  var VERSION = '6.21.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -282,6 +282,11 @@
       if (!order) return null;
       return { key: key, kind: 'matching', content: JSON.stringify({ order: order }), local: true };
     }
+    if (kind === 'table') {
+      var picks = tableFromText(text);
+      if (!picks) return null;
+      return { key: key, kind: 'table', content: JSON.stringify({ picks: picks }), local: true };
+    }
     return { key: key, kind: kind, content: text, local: true };
   }
 
@@ -296,6 +301,9 @@
     };
     var name = ctx.key + '.' + item.ext;
     var res;
+    /* Никаких всплывающих сообщений о сохранении: справа снизу идёт обычная
+       загрузка. Крутится — сохранение идёт; пропала — ответ сохранён.         */
+    saveSpin(true);
     try {
       res = await fetch(API + '/contents/' + INBOX + '/' + name, {
         method: 'PUT',
@@ -306,14 +314,17 @@
         })
       });
     } catch (e) {
+      saveSpin(false, 'err');
       storeDown = Date.now() + 60000;
       throw new Error('GitHub недоступен: ' + e.message);
     }
     /* 409/422 — файл уже лежит в очереди с прошлого раза, это не ошибка */
     if (!res.ok && res.status !== 409 && res.status !== 422) {
+      saveSpin(false, 'err');
       if (res.status === 401 || res.status === 403) storeDown = Date.now() + 60000;
       throw new Error(await ghError(res));
     }
+    saveSpin(false, 'ok');
 
     /* робот перенесёт файл за секунды, но CDN ещё до пяти минут отдаёт старый
        индекс — поэтому держим шаг в своём списке, пока он там не появится.
@@ -734,6 +745,10 @@
       if (mq && mq.getBoundingClientRect().height) el = mq;
     }
     if (!el) {
+      var tq = tableQuizTable();
+      if (tq && tq.getBoundingClientRect().height) el = tq;
+    }
+    if (!el) {
       var cm = $('.CodeMirror');
       if (cm && cm.getBoundingClientRect().height) el = cm;
     }
@@ -830,6 +845,16 @@
       var data = null;
       try { data = JSON.parse(saved.content); } catch (e) { data = null; }
       res = data ? writeChoice(data) : { ok: false, error: 'битая запись ответа ' + saved.key };
+    } else if (saved.kind === 'table') {
+      var tdata = null;
+      try { tdata = JSON.parse(saved.content); } catch (e) { tdata = null; }
+      var tpicks = tdata && tdata.picks;
+      if (!tpicks || !tpicks.length) {
+        res = { ok: false, error: 'битая запись ответа ' + saved.key };
+      } else {
+        res = writeTable(tpicks);
+        aiLogTable(tpicks);
+      }
     } else if (saved.kind === 'matching') {
       var mdata = null;
       try { mdata = JSON.parse(saved.content); } catch (e) { mdata = null; }
@@ -888,6 +913,69 @@
     'font:14.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;box-shadow:0 1px 2px rgba(0,0,0,.05),0 4px 12px rgba(0,0,0,.06)}',
     '#sgx-toast.on{display:block}',
     '#sgx-toast.err{background:#FCE9E7;border-color:#F3C8C3;color:#b23f34}',
+    /* --- индикатор сохранения: правый нижний угол, без текста ---
+       Крутится — идёт запись, галочка — ответ сохранён, крестик — не вышло.    */
+    /* --- первое знакомство ---
+       Затемнение с размытием: сайт виден, но не мешает читать подсказку.
+       Подсвеченный элемент «горит» — на него и намекаем.                       */
+    '#sgx-tour{position:fixed;inset:0;z-index:2147483600;display:none}',
+    '#sgx-tour.on{display:block}',
+    '#sgx-tour .sgx-tour-dim{position:absolute;inset:0;background:rgba(15,15,14,.62);',
+    'backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px)}',
+    '#sgx-tour .sgx-tour-ring{position:absolute;border-radius:10px;pointer-events:none;',
+    'box-shadow:0 0 0 3px rgba(255,214,102,.95),0 0 26px 10px rgba(255,196,0,.45);',
+    'animation:sgx-glow 1.6s ease-in-out infinite}',
+    '@keyframes sgx-glow{0%,100%{box-shadow:0 0 0 3px rgba(255,214,102,.95),0 0 26px 10px rgba(255,196,0,.45)}',
+    '50%{box-shadow:0 0 0 4px rgba(255,224,130,1),0 0 34px 16px rgba(255,196,0,.65)}}',
+    '#sgx-tour svg.sgx-tour-arrow{position:absolute;pointer-events:none;overflow:visible}',
+    '#sgx-tour .sgx-tour-card{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);',
+    'width:min(430px,86vw);padding:22px 24px;border-radius:12px;background:#fff;color:#1F1D1B;',
+    'box-shadow:0 24px 60px rgba(0,0,0,.35);',
+    'font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
+    '#sgx-tour .sgx-tour-card h3{margin:0 0 8px;font-size:20px;font-weight:700}',
+    '#sgx-tour .sgx-tour-card p{margin:0 0 16px;color:#4B4A47}',
+    '#sgx-tour .sgx-tour-card .sgx-tour-row{display:flex;align-items:center;gap:10px}',
+    '#sgx-tour .sgx-tour-card button{flex:1 1 0;height:46px;border:0;border-radius:8px;cursor:pointer;',
+    'font:600 16px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
+    '#sgx-tour .sgx-tour-card .sgx-tour-next{background:#1F1D1B;color:#fff}',
+    '#sgx-tour .sgx-tour-card .sgx-tour-skip{flex:0 0 auto;background:transparent;color:#7D7B76;',
+    'font-weight:500;text-decoration:underline;padding:0 6px}',
+    '#sgx-tour .sgx-tour-dots{display:flex;gap:6px;justify-content:center;margin:0 0 14px}',
+    '#sgx-tour .sgx-tour-dots i{width:7px;height:7px;border-radius:50%;background:#DCDBD7}',
+    '#sgx-tour .sgx-tour-dots i.on{background:#1F1D1B}',
+    /* --- вопрос перед знакомством --- */
+    '#sgx-tour-ask{position:fixed;inset:0;z-index:2147483601;display:none;align-items:center;',
+    'justify-content:center;background:rgba(15,15,14,.5);backdrop-filter:blur(4px);',
+    '-webkit-backdrop-filter:blur(4px)}',
+    '#sgx-tour-ask.on{display:flex}',
+    '#sgx-tour-ask .sgx-ask-card{width:min(400px,86vw);padding:24px;border-radius:12px;background:#fff;',
+    'text-align:center;box-shadow:0 24px 60px rgba(0,0,0,.35);',
+    'font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1F1D1B}',
+    '#sgx-tour-ask h3{margin:0 0 6px;font-size:20px;font-weight:700}',
+    '#sgx-tour-ask p{margin:0 0 20px;color:#4B4A47}',
+    '#sgx-tour-ask .sgx-ask-go{display:block;width:100%;height:48px;border:0;border-radius:8px;',
+    'background:#1F1D1B;color:#fff;cursor:pointer;font:600 16px -apple-system,BlinkMacSystemFont,'
+      + '"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
+    '#sgx-tour-ask .sgx-ask-skip{display:block;width:100%;margin-top:10px;border:0;background:transparent;',
+    'color:#8A8884;cursor:pointer;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,'
+      + 'Helvetica,Arial,sans-serif;text-decoration:underline}',
+    '#sgx-save{position:fixed;right:20px;bottom:20px;z-index:2147482900;display:none;',
+    'width:36px;height:36px;border-radius:50%;background:#fff;border:1px solid #E6E5E3;',
+    'box-shadow:0 2px 10px rgba(15,15,14,.12);align-items:center;justify-content:center;',
+    'transition:opacity .3s ease}',
+    '#sgx-save.on{display:flex}',
+    '#sgx-save .sgx-save-ring{width:18px;height:18px;border-radius:50%;border:2px solid #DCDBD7;',
+    'border-top-color:#2F7CE0;animation:sgx-spin .7s linear infinite}',
+    '#sgx-save .sgx-save-tick,#sgx-save .sgx-save-cross{display:none}',
+    '#sgx-save.done .sgx-save-ring{display:none}',
+    '#sgx-save.done.ok .sgx-save-tick{display:block;width:6px;height:12px;margin-top:-3px;',
+    'border:solid #2E7D32;border-width:0 2px 2px 0;transform:rotate(45deg)}',
+    '#sgx-save.done.err .sgx-save-cross{display:block;position:relative;width:16px;height:16px}',
+    '#sgx-save.done.err .sgx-save-cross::before,#sgx-save.done.err .sgx-save-cross::after{',
+    'content:"";position:absolute;left:0;top:7px;width:16px;height:2px;background:#C0392B}',
+    '#sgx-save.done.err .sgx-save-cross::before{transform:rotate(45deg)}',
+    '#sgx-save.done.err .sgx-save-cross::after{transform:rotate(-45deg)}',
+    '@keyframes sgx-spin{to{transform:rotate(360deg)}}',
     /* --- отчёт самопроверки --- */
     '#sgx-report{position:fixed;inset:0;z-index:2147483647;background:rgba(15,15,14,.45);display:flex;',
     'align-items:center;justify-content:center;font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
@@ -904,8 +992,9 @@
        радиусы 8/10, шрифты 14/15/16. Раньше у каждого блока были свои числа, и
        рядом они выглядели как набор случайных размеров.                        */
     '#sgx-panel{--sgx-s1:4px;--sgx-s2:8px;--sgx-s3:12px;--sgx-s4:16px;',
-    '--sgx-ctl:40px;--sgx-r:10px;--sgx-r-sm:8px;',
-    '--sgx-f-xs:14px;--sgx-f-sm:15px;--sgx-f:16px;',
+    '--sgx-ctl:44px;--sgx-r:10px;--sgx-r-sm:8px;',
+    /* Шрифт панели крупнее прежнего: на тёмном фоне мелкий текст читался мутно. */
+    '--sgx-f-xs:15px;--sgx-f-sm:16px;--sgx-f:17px;',
     'position:relative;display:none;width:100%;box-sizing:border-box;',
     'font:var(--sgx-f)/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#fff}',
     '#sgx-panel.on{display:block}',
@@ -929,10 +1018,13 @@
     '#sgx-panel select:focus{outline:2px solid rgba(120,190,255,.5);outline-offset:1px}',
     '#sgx-panel .sgx-note{padding:var(--sgx-s2) var(--sgx-s4) var(--sgx-s1);font-size:var(--sgx-f-xs);',
     'color:rgba(255,255,255,.55);line-height:1.45}',
+    /* Кнопки — во всю ширину, квадратные и вплотную друг к другу: человек просил
+       убрать скругления и промежутки. Разделяет их только тонкая линия.         */
     '#sgx-panel .sgx-btn{display:flex;align-items:center;justify-content:center;gap:var(--sgx-s2);',
-    'width:calc(100% - var(--sgx-s4) * 2);margin:0 var(--sgx-s4) var(--sgx-s2);height:44px;',
-    'border:1px solid transparent;border-radius:var(--sgx-r-sm);padding:0;',
-    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:var(--sgx-f-sm);font-weight:500;cursor:pointer;',
+    'width:100%;margin:0;height:50px;border:0;border-top:1px solid rgba(255,255,255,.10);',
+    'border-radius:0;padding:0;',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;',
+    'font-size:var(--sgx-f-sm);font-weight:500;cursor:pointer;letter-spacing:.2px;',
     'transition:background .15s ease,color .15s ease}',
     '#sgx-panel .sgx-btn.primary{background:#fff;color:#1F1D1B}',
     '#sgx-panel .sgx-btn.primary:hover{background:#EDEDED}',
@@ -945,10 +1037,33 @@
     '#sgx-panel .sgx-btn:disabled{opacity:.4;cursor:default;background:rgba(255,255,255,.06);color:#fff;',
     'border-color:rgba(255,255,255,.10)}',
     '#sgx-panel .sgx-ic{flex:0 0 auto}',
+    /* --- всплывающее окно выбора диапазона и экран настроек --- */
+    '#sgx-panel .sgx-pop{position:absolute;inset:0;z-index:5;display:none;',
+    'flex-direction:column;justify-content:center;gap:var(--sgx-s3);',
+    'padding:var(--sgx-s4);background:rgba(20,22,26,.97)}',
+    '#sgx-panel .sgx-pop.on{display:flex}',
+    '#sgx-panel .sgx-pop h4{margin:0;font-size:var(--sgx-f);font-weight:600;color:#fff}',
+    '#sgx-panel .sgx-pop .sgx-prow{display:flex;align-items:center;gap:var(--sgx-s2)}',
+    '#sgx-panel .sgx-pop .sgx-prow label{flex:0 0 34px;font-size:var(--sgx-f-sm);',
+    'color:rgba(255,255,255,.75)}',
+    '#sgx-panel .sgx-pop .sgx-prow select,#sgx-panel .sgx-pop .sgx-prow input{',
+    'flex:1 1 0;min-width:0;height:var(--sgx-ctl);padding:0 var(--sgx-s2);',
+    'border:1px solid rgba(255,255,255,.2);border-radius:var(--sgx-r-sm);',
+    'background:rgba(255,255,255,.08);color:#fff;font-size:var(--sgx-f-sm);',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
+    '#sgx-panel .sgx-pop .sgx-prow select option{background:#fff;color:#1F1D1B}',
+    '#sgx-panel .sgx-pop .sgx-pbtn{display:flex;align-items:center;justify-content:center;',
+    'height:50px;border:0;border-radius:0;background:#fff;color:#1F1D1B;cursor:pointer;',
+    'font-size:var(--sgx-f-sm);font-weight:600;',
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
+    '#sgx-panel .sgx-pop .sgx-pbtn.ghost{background:rgba(255,255,255,.10);color:#fff}',
+    '#sgx-panel .sgx-pop .sgx-phint{font-size:var(--sgx-f-xs);color:rgba(255,255,255,.6);line-height:1.5}',
     '#sgx-panel .sgx-progress{height:3px;background:rgba(255,255,255,.12);margin:2px 0 0}',
     '#sgx-panel .sgx-bar{height:100%;width:0;background:#4CAF50;transition:width .35s ease}',
-    '#sgx-panel .sgx-status{padding:var(--sgx-s3) var(--sgx-s4) var(--sgx-s4);font-size:var(--sgx-f-sm);',
-    'color:rgba(255,255,255,.72);min-height:38px;line-height:1.5}',
+    /* Текста в панели нет: человек просил его убрать. Прогресс виден по полосе,
+       важные сообщения приходят тостом, а сам текст остаётся в data-атрибуте
+       документа (по нему работает отчёт самопроверки).                          */
+    '#sgx-panel .sgx-status{display:none}',
     /* --- блок ИИ внутри панели: повторяет родной редактор кода Stepik --- */
     '#sgx-panel .sgx-ai[hidden]{display:none}',
     /* --- блок ИИ: живёт на месте редактора кода в карточке задания ---
@@ -965,8 +1080,10 @@
        иначе решение перестаёт читаться как код. Кнопки крупные (--sgx-ctl),
        поле ответа — фиксированной высоты и только прокручивается.            */
     '#sgx-ai-root{--sgx-s1:4px;--sgx-s2:8px;--sgx-s3:12px;--sgx-s4:16px;',
-    '--sgx-ctl:40px;--sgx-r:10px;--sgx-r-sm:8px;',
-    '--sgx-f-xs:14px;--sgx-f-sm:15px;--sgx-f:16px;--sgx-mono:16px;',
+    /* Шкала та же, что у панели: блок и панель стоят рядом, и размеры у них
+       должны совпадать. Шрифт поднят — на прежнем мелком текст читался мутно.  */
+    '--sgx-ctl:44px;--sgx-r:10px;--sgx-r-sm:8px;',
+    '--sgx-f-xs:15px;--sgx-f-sm:16px;--sgx-f:17px;--sgx-mono:17px;',
     '--sgx-bd:#E5E5E5;--sgx-bg-head:#F4F4F4;--sgx-fg:#2C2C2B;--sgx-fg-dim:#7D7B76;',
     'display:none;width:100%;box-sizing:border-box;margin:var(--sgx-s4) 0 0;',
     'border:1px solid var(--sgx-bd);border-radius:var(--sgx-r);background:#fff;overflow:hidden;',
@@ -1449,6 +1566,27 @@
     setTimeout(function () { ov.remove(); }, 700);
   }
 
+  /* Индикатор сохранения в правом нижнем углу — вместо всплывающего уведомления.
+     Крутится, пока идёт запись; превратился в галочку и растаял — ответ сохранён.
+     Текста нет намеренно: человек просил не сообщение, а обычную загрузку.      */
+  var saveEl = null;
+  var saveTimer = null;
+
+  function saveSpin(on, state) {
+    if (!saveEl) {
+      saveEl = document.createElement('div');
+      saveEl.id = 'sgx-save';
+      saveEl.innerHTML = '<span class="sgx-save-ring"></span>' +
+        '<span class="sgx-save-tick"></span><span class="sgx-save-cross"></span>';
+      document.body.appendChild(saveEl);
+    }
+    clearTimeout(saveTimer);
+    if (on) { saveEl.className = 'on'; return; }
+    saveEl.className = 'on done ' + (state === 'err' ? 'err' : 'ok');
+    saveTimer = setTimeout(function () { saveEl.className = ''; },
+      state === 'err' ? 2600 : 1300);
+  }
+
   function toast(text, isError) {
     if (!toastEl) {
       toastEl = document.createElement('div');
@@ -1563,6 +1701,9 @@ var ICONS = {
       '<line x1="14" y1="11" x2="14" y2="17"/>',
     /* иконки моделей: у каждой модели свой значок в списке выбора */
     bolt: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    /* шестерёнка для кнопки настроек */
+    cog: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1' +
+      'M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>',
     chip: '<rect x="6" y="6" width="12" height="12" rx="2"/>' +
       '<path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
     gem: '<path d="M6 3h12l4 6-10 12L2 9z"/><path d="M2 9h20M9 3l3 18M15 3l-3 18"/>',
@@ -2330,6 +2471,13 @@ async function jobCollect(ctx, target) {
   }
 
   function aiModeForKind(kind, retry) {
+    /* Таблица — тот же короткий структурированный ответ, что и сопоставление:
+       одна строка на строку таблицы. Сильная «думающая» модель тут только
+       добавит минуту ожидания.                                                */
+    if (kind === 'table') {
+      return { retry: false, modelId: 'glm-5.3-flash', timeoutMs: 25000,
+        maxTokens: 512, temperature: 0 };
+    }
     if (kind === 'matching') {
       return {
         retry: false,
@@ -2644,9 +2792,108 @@ async function jobCollect(ctx, target) {
     if ($('.CodeMirror, .cm-content')) return 'code';
     if ($('.string-quiz__textarea')) return 'text';
     if ($('.matching-quiz')) return 'matching';
+    /* Таблица «Отметьте верные ячейки» тоже собрана на радиокнопках, поэтому
+       проверять её надо РАНЬШЕ выбора: иначе она уходила бы по ветке теста и
+       скрипт искал бы варианты ответа там, где их нет.                        */
+    if (tableQuizTable()) return 'table';
     if ($('.quiz-component input[type="radio"], .quiz-component input[type="checkbox"]')) return 'choice';
     if ($('.attempt-wrapper__plugin textarea')) return 'code';
     return 'text';
+  }
+
+  /* ================================================ таблица «верные ячейки» */
+
+  /* Задание вида «Отметьте верные ячейки»: строки — куски кода, столбцы —
+     варианты (true / false / ошибка). В каждой строке отмечается ровно один
+     столбец, и выбрать его нужно по смыслу строки.                            */
+
+  function tableQuizTable() {
+    return $('[data-type="table-quiz"] table') || $('.table-quiz__table');
+  }
+
+  function tableQuizRows() {
+    var table = tableQuizTable();
+    if (!table) return [];
+    var heads = $$('thead th', table).map(function (th) { return norm(th.textContent); });
+    /* первый столбец — сам код, он подписью и остаётся */
+    var out = [];
+    $$('tbody tr', table).forEach(function (tr) {
+      var cells = $$('td', tr);
+      if (cells.length < 2) return;
+      var label = norm(cells[0].textContent || '');
+      var inputs = [];
+      for (var i = 1; i < cells.length; i++) {
+        inputs.push(cells[i].querySelector('input[type="radio"]') ||
+          cells[i].querySelector('input'));
+      }
+      if (!label || !inputs.length) return;
+      out.push({ label: label, inputs: inputs });
+    });
+    return out.length ? { heads: heads, rows: out } : [];
+  }
+
+  /* Разбираем ответ модели: по одной строке на каждую строку таблицы, в строке —
+     название столбца. Сравниваем без учёта регистра и допускаем сокращение:
+     модель может написать «Ошибка» вместо «Ошибка (FormatException)».          */
+  function tableFromText(text) {
+    var t = tableQuizRows();
+    if (!t || t.rows.length < 2 || t.heads.length < 2) return null;
+
+    var lines = String(text || '').split('\n').map(function (l) {
+      return norm(l).replace(/^[-*•·]\s*/, '').replace(/^\d+\s*[).:—-]\s*/, '').trim();
+    }).filter(function (l) { return l.length > 0; });
+    if (lines.length < t.rows.length) return null;
+
+    /* Первый столбец — сам код, он не вариант ответа. Поэтому и сравниваем, и
+       нумеруем только оставшиеся: иначе всё съезжало на столбец вправо.        */
+    var cols = t.heads.slice(1);
+    if (cols.length !== t.rows[0].inputs.length) {
+      /* шапка и ячейки разошлись — считаем по ячейкам */
+      cols = t.rows[0].inputs.map(function (_, k) { return t.heads[k + 1] || ''; });
+    }
+
+    var picks = [];
+    for (var i = 0; i < t.rows.length; i++) {
+      var l = lines[i].toLowerCase();
+      var idx = -1;
+      /* 1. точное совпадение со столбцом */
+      for (var j = 0; j < cols.length; j++) {
+        if (cols[j] && cols[j].toLowerCase() === l) { idx = j; break; }
+      }
+      /* 2. столбец внутри строки («это true») */
+      if (idx < 0) {
+        for (var k = 0; k < cols.length; k++) {
+          var h = (cols[k] || '').toLowerCase();
+          if (h.length > 2 && l.indexOf(h) >= 0) { idx = k; break; }
+        }
+      }
+      /* 3. сокращение вместо полного названия столбца («Ошибка») */
+      if (idx < 0 && l.length > 2) {
+        for (var m = 0; m < cols.length; m++) {
+          var hh = (cols[m] || '').toLowerCase();
+          if (hh && hh.indexOf(l) >= 0) { idx = m; break; }
+        }
+      }
+      if (idx < 0) return null;
+      picks.push(idx);
+    }
+    return picks;
+  }
+
+  /* Отмечаем по одному столбцу в каждой строке. */
+  function writeTable(picks) {
+    var t = tableQuizRows();
+    if (!t || !picks || picks.length !== t.rows.length) {
+      return { ok: false, error: 'таблица не совпала с ответом' };
+    }
+    var done = 0;
+    t.rows.forEach(function (row, i) {
+      var inp = row.inputs[picks[i]];
+      if (!inp) return;
+      if (!inp.checked) inp.click();
+      done++;
+    });
+    return { ok: done === t.rows.length, applied: done, total: t.rows.length };
   }
 
   /* ============================================ задание на сопоставление */
@@ -2753,6 +3000,16 @@ async function jobCollect(ctx, target) {
         '1. Отвечай ровно на вопрос и тем же языком, что и вопрос.\n' +
         '2. Пиши так, как ответил бы студент этого урока: коротко и по делу.';
     }
+    if (kind === 'table') {
+      return 'Реши задание со Stepik с таблицей «отметьте верные ячейки». В каждой ' +
+        'строке таблицы слева написан код, а справа нужно выбрать ОДИН столбец: ' +
+        'что произойдёт при выполнении этого кода.\n' +
+        'Верни по одной строке на каждую строку таблицы — ровно название выбранного ' +
+        'столбца, без нумерации, без пояснений и без markdown.\n' +
+        '1. Строк должно быть столько же, сколько строк в таблице, в том же порядке.\n' +
+        '2. Название столбца пиши так, как оно написано в шапке таблицы.\n' +
+        '3. Никакого кода писать не нужно.';
+    }
     if (kind === 'matching') {
       return 'Реши задание на сопоставление со Stepik. Слева список подписей в нужном ' +
         'порядке, справа список значений, которые надо расставить ТАК ЖЕ — чтобы ' +
@@ -2830,6 +3087,22 @@ async function jobCollect(ctx, target) {
     var kind = kindIn || stepKindNow();
     var lang = stepLanguage();
     var task = stepPrompt();
+
+    /* Таблица: строки с кодом и названия столбцов. */
+    if (kind === 'table') {
+      var tq = tableQuizRows();
+      var tbase = aiLessonBlock() + '\nЗадание с таблицей. В каждой строке нужно выбрать ' +
+        'один столбец — то, что произойдёт при выполнении кода слева.\n\nВопрос:\n' + task +
+        '\n\nСтолбцы: ' + (tq ? tq.heads.slice(1).join(' | ') : '') +
+        '\n\nСтроки таблицы:\n' +
+        (tq ? tq.rows.map(function (r, i) { return (i + 1) + ') ' + r.label; }).join('\n') : '') +
+        '\n\nВерни название столбца для каждой строки, по одному в строке, в том же порядке.';
+      if (ctx && ctx.checkError) {
+        tbase += '\n\nЧто ответила проверка:\n' + String(ctx.checkError).slice(0, 1200) +
+          '\nРазберись, где ошибся, и верни столбцы заново.';
+      }
+      return tbase;
+    }
 
     /* Сопоставление: отдаём оба столбца как есть. Левый — в порядке страницы,
        правый — как он стоит сейчас, чтобы модель видела, что переставлять.     */
@@ -3170,15 +3443,19 @@ async function jobCollect(ctx, target) {
     }
 
     var task = stepPrompt();
+    var kind = stepKindNow();
     /* Пустое условие — это не «ИИ не смог», а «я не нашёл задание». Отправлять
        пустоту бессмысленно: модель честно ответит «условие отсутствует», и человек
-       решит, что от него чего-то ждут. Говорим прямо, что не видим условие. */
-    if (task.length < 40) {
+       решит, что от него чего-то ждут. Говорим прямо, что не видим условие.
+
+       Но у теста с выбором, сопоставления и таблицы условие короткое по своей
+       природе («Отметьте верные ячейки») — там всё нужное лежит не в тексте, а в
+       самих вариантах. Для них довольно непустого условия.                    */
+    var structural = kind === 'choice' || kind === 'matching' || kind === 'table';
+    if (task.length < 40 && !(structural && task.length > 0)) {
       setStatus('ИИ: не вижу условия задания на странице — раскрой карточку и попробуй снова');
       return;
     }
-
-    var kind = stepKindNow();
     var thinkLabel = kind === 'matching' ? 'ИИ сопоставляет значения…'
       : (fixed ? 'ИИ ищет ошибку в тесте…' : 'ИИ пишет решение…');
     var thinkSlow = kind === 'matching'
@@ -3550,10 +3827,30 @@ async function jobCollect(ctx, target) {
     /* Вид берём из ответа: 'text' — свободный ответ в поле, его нельзя сводить
        к 'code', иначе он уходит по ветке редактора и в ленте пишется про код. */
     var kind = (aiAnswer.kind === 'choice' || aiAnswer.kind === 'text' ||
-      aiAnswer.kind === 'matching') ? aiAnswer.kind : 'code';
+      aiAnswer.kind === 'matching' || aiAnswer.kind === 'table') ? aiAnswer.kind : 'code';
     var target = insertTarget();
 
     var res;
+    /* Таблица: отмечаем выбранный столбец в каждой строке. */
+    if (kind === 'table') {
+      var picks = tableFromText(aiAnswer.text);
+      if (!picks) {
+        aiLogAdd('Не разобрал, какие столбцы выбрать, — отметь сам, пожалуйста. ' +
+          'Строки таблицы выше в чате.', 'sys');
+        return { skipped: 'столбцы не распознаны' };
+      }
+      res = writeTable(picks);
+      if (!res.ok) {
+        aiLogAdd('Отметить ячейки не получилось: ' +
+          (res.error || 'таблица не совпала') + '.', 'sys');
+        return { skipped: res.error || 'ошибка таблицы' };
+      }
+      aiLogAdd('Отметил по одному столбцу в каждой строке. ' +
+        'Осталось нажать «Отправить на проверку».', 'sys');
+      if (target) flash(target.anchor);
+      return { inserted: true, ran: false, kind: 'table' };
+    }
+
     /* Сопоставление: расставляем правый столбец в порядке из ответа. */
     if (kind === 'matching') {
       var want = matchingFromText(aiAnswer.text);
@@ -3649,6 +3946,21 @@ async function jobCollect(ctx, target) {
 
   /* Возвращаем блок и когда он ещё не поставлен на страницу: иначе настройки,
      применённые до появления места, уходили бы в никуда.                       */
+  /* Ссылка на блок ИИ. Проверяем, что узел ВСЁ ЕЩЁ В ДОКУМЕНТЕ: Stepik
+     перерисовывает карточку задания, наш блок при этом выбрасывается из дерева,
+     а сохранённая ссылка остаётся. Раньше «открыть блок» работало с оторванным
+     узлом — класс on ставился, а на экране ничего не появлялось. Отсюда и жалоба
+     «закрыл и не могу открыть заново».                                        */
+  function nodeInDoc(n) {
+    if (!n) return false;
+    if (typeof n.isConnected === 'boolean') return n.isConnected;
+    return !!(document.body && document.body.contains(n));
+  }
+
+  /* Узел мог быть выброшен из документа перерисовкой карточки — но сам он жив,
+     и в нём лежит лента. Выбрасывать ссылку нельзя: пересоздание блока означало
+     бы пустой чат и потерянный отчёт проверки. Возвращаем как есть, а на место
+     его ставит aiSlot (см. aiShow и tick).                                    */
   function aiRootEl() {
     if (aiRootCache) return aiRootCache;
     var found = document.getElementById('sgx-ai-root');
@@ -3656,7 +3968,13 @@ async function jobCollect(ctx, target) {
     return found;
   }
 
-  function aiLogEl() { return document.getElementById('sgx-ai-log'); }
+  /* Ленту берём и у отвязанного блока: пока Stepik перерисовывает карточку, в неё
+     успевают прийти отчёт проверки и сообщения, и терять их нельзя.           */
+  function aiLogEl() {
+    return document.getElementById('sgx-ai-log') ||
+      (aiRootCache && aiRootCache.querySelector
+        ? aiRootCache.querySelector('#sgx-ai-log') : null);
+  }
 
   /* Строка чата: слева аватар отвечающей модели, справа сообщение. Раньше
      служебные строки были просто серым мелким текстом с маленькой буквы
@@ -3678,12 +3996,19 @@ async function jobCollect(ctx, target) {
      меню Tampermonkey — тогда блока ещё нет, и все записи в ленту молча уходили
      в никуда: человек открывал и видел пустоту. Поэтому сначала создаём блок и
      ставим его на место, и только потом показываем.                            */
+  /* Человек хочет видеть блок. Отдельный признак нужен потому, что сам узел
+     может исчезнуть из документа (Stepik перерисовывает карточку) — по одному
+     классу on понять «закрыли» или «выбросили» нельзя.                         */
+  var aiWantOpen = false;
+
   function aiShow(on) {
     if (on === false) {
+      aiWantOpen = false;
       var off = aiRootEl();
       if (off) off.classList.remove('on');
       return;
     }
+    aiWantOpen = true;
     if (!aiRootEl()) ensureAiRoot();
     /* на странице задания места может ещё не быть — тогда пробуем и на следующем
        тике: карточка дорисовывается асинхронно.                                */
@@ -3695,7 +4020,11 @@ async function jobCollect(ctx, target) {
       }, 400);
     }
     var box = aiRootEl();
-    if (box) box.classList.add('on');
+    if (!box) return;
+    /* Блок мог быть выброшен из документа перерисовкой карточки: тогда класс on
+       поставится, а на экране ничего не появится. Ставим на место ещё раз.     */
+    if (!nodeInDoc(box)) aiSlot();
+    box.classList.add('on');
   }
 
   function aiVisible() {
@@ -3706,6 +4035,7 @@ async function jobCollect(ctx, target) {
   function aiLogClear() {
     var log = aiLogEl();
     if (log) log.innerHTML = '';
+    aiLogSnap = '';
     return log;
   }
 
@@ -3966,6 +4296,32 @@ async function jobCollect(ctx, target) {
     return box;
   }
 
+  /* Таблица в ленте: строка кода и выбранный для неё столбец. */
+  function aiLogTable(picks) {
+    var log = aiLogEl();
+    var t = tableQuizRows();
+    if (!log || !t || !picks) return null;
+    var box = document.createElement('div');
+    box.className = 'sgx-ai-msg sgx-ai-opts';
+    t.rows.forEach(function (r, i) {
+      var row = document.createElement('div');
+      row.className = 'sgx-ai-opt on';
+      var txt = document.createElement('span');
+      txt.className = 'sgx-ai-opttext';
+      txt.textContent = r.label + '  →  ' + (t.heads[picks[i] + 1] || '?');
+      row.appendChild(txt);
+      box.appendChild(row);
+    });
+    var note = document.createElement('div');
+    note.className = 'sgx-ai-optnote';
+    note.textContent = 'Отметил по одному столбцу в каждой строке.';
+    box.appendChild(note);
+
+    log.appendChild(aiRow(box, aiAnswer && aiAnswer.model));
+    log.scrollTop = log.scrollHeight;
+    return box;
+  }
+
   /* Показать готовое решение в ленте. Никаких подписей «свой ключ» и названий
      моделей: это служебные подробности скрипта, человеку их знать не нужно,
      а ленту они засоряют. Модель и так видна в шапке блока.                    */
@@ -3981,6 +4337,10 @@ async function jobCollect(ctx, target) {
     if (aiAnswer.kind === 'matching') {
       var order = matchingFromText(aiAnswer.text);
       if (aiLogMatching(order)) return;
+    }
+    if (aiAnswer.kind === 'table') {
+      var picks0 = tableFromText(aiAnswer.text);
+      if (aiLogTable(picks0)) return;
     }
     /* под логотипом именно той модели, что ответила: человек мог переключить
        модель после ответа, и подпись не должна ему врать                        */
@@ -4262,6 +4622,141 @@ async function jobCollect(ctx, target) {
     if (!keepStatus && !busy) setStatus('');
   }
 
+  /* ============================================ первое знакомство со скриптом */
+
+  /* Показываем один раз: пока человек не прошёл знакомство или не отказался,
+     в хранилище нет отметки. Дальше шаги описываются так же — добавление нового
+     шага в TOUR_STEPS достаточно, чтобы он попал в инструкцию.                 */
+  var TOUR_KEY = 'tourDone';
+
+  var TOUR_STEPS = [
+    { target: '#sgx-tools-btn', title: 'Панель заданий',
+      text: 'Вот она — кнопка в шапке урока. Открывает список заданий: пройти их подряд и собрать в документ Word.' },
+    { target: '#sgx-chip', title: 'Скоба «есть решение»',
+      text: 'У задания с готовым ответом появляется скоба: «вставить» подставит ответ, «нет» уберёт её, «ИИ» откроет чат.' },
+    { target: '#sgx-ai-root', title: 'Чат с ИИ',
+      text: 'Здесь ИИ решает задание: печатает код прямо в редактор, сам запускает его и исправляет, если проверка не приняла.' },
+    { target: '#sgx-panel', title: 'Настройки',
+      text: 'Диапазон заданий, сборка в Word и настройки — всё в панели. Кнопка «Настройки» внизу.' }
+  ];
+
+  function tourNeeded() {
+    try { return !GM_getValue(TOUR_KEY, false); } catch (e) { return false; }
+  }
+
+  function tourDone() {
+    try { GM_setValue(TOUR_KEY, true); } catch (e) { /* ignore */ }
+  }
+
+  function tourAsk() {
+    var old = document.getElementById('sgx-tour-ask');
+    if (old) old.remove();
+    var box = document.createElement('div');
+    box.id = 'sgx-tour-ask';
+    box.innerHTML = [
+      '<div class="sgx-ask-card">',
+      '<h3>Хотите пройти ознакомление со скриптом?</h3>',
+      '<p>Пара шагов — и будет видно, что где лежит.</p>',
+      '<button class="sgx-ask-go" type="button">Пройти</button>',
+      '<button class="sgx-ask-skip" type="button">Пропустить</button>',
+      '</div>'
+    ].join('');
+    document.body.appendChild(box);
+    box.classList.add('on');
+    box.querySelector('.sgx-ask-go').addEventListener('click', function () {
+      box.remove();
+      tourStart(0);
+    });
+    box.querySelector('.sgx-ask-skip').addEventListener('click', function () {
+      box.remove();
+      tourDone();
+    });
+  }
+
+  /* Подсказка стоит по центру, а на нужный элемент показывает стрелка и
+     подсветка. Элемента может не быть на этом шаге — тогда просто показываем
+     текст без стрелки, а не ломаемся.                                        */
+  function tourStart(i) {
+    var step = TOUR_STEPS[i];
+    if (!step) { tourEnd(); return; }
+
+    var old = document.getElementById('sgx-tour');
+    if (old) old.remove();
+    var ov = document.createElement('div');
+    ov.id = 'sgx-tour';
+    var dots = TOUR_STEPS.map(function (_, k) {
+      return '<i class="' + (k === i ? 'on' : '') + '"></i>';
+    }).join('');
+    ov.innerHTML = [
+      '<div class="sgx-tour-dim"></div>',
+      '<div class="sgx-tour-ring" id="sgx-tour-ring" style="display:none"></div>',
+      '<svg class="sgx-tour-arrow" id="sgx-tour-arrow" width="0" height="0"><path fill="none" ',
+      'stroke="#FFD666" stroke-width="3" stroke-linecap="round" stroke-dasharray="7 6" d=""></path>',
+      '<path fill="#FFD666" d=""></path></svg>',
+      '<div class="sgx-tour-card">',
+      '<div class="sgx-tour-dots">' + dots + '</div>',
+      '<h3>' + escapeHtml(step.title) + '</h3>',
+      '<p>' + escapeHtml(step.text) + '</p>',
+      '<div class="sgx-tour-row">',
+      '<button class="sgx-tour-next" type="button">' +
+      (i + 1 < TOUR_STEPS.length ? 'Дальше' : 'Готово') + '</button>',
+      '<button class="sgx-tour-skip" type="button">Пропустить</button>',
+      '</div></div>'
+    ].join('');
+    document.body.appendChild(ov);
+    ov.classList.add('on');
+
+    ov.querySelector('.sgx-tour-next').addEventListener('click', function () { tourStart(i + 1); });
+    ov.querySelector('.sgx-tour-skip').addEventListener('click', function () { tourEnd(); });
+
+    /* Подсветка и стрелка: цель ищем каждый раз заново — вёрстка Stepik живая. */
+    var el = null;
+    try { el = document.querySelector(step.target); } catch (e) { el = null; }
+    if (el) {
+      var r = el.getBoundingClientRect();
+      if (r.width && r.height) {
+        var ring = ov.querySelector('#sgx-tour-ring');
+        ring.style.display = 'block';
+        ring.style.left = (r.left - 6) + 'px';
+        ring.style.top = (r.top - 6) + 'px';
+        ring.style.width = (r.width + 12) + 'px';
+        ring.style.height = (r.height + 12) + 'px';
+
+        var card = ov.querySelector('.sgx-tour-card').getBoundingClientRect();
+        var from = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+        var to = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        /* Стрелка идёт от центра экрана к элементу, но начинается за краем
+           подсказки, чтобы не лезть под текст.                                  */
+        var dx = to.x - from.x, dy = to.y - from.y;
+        var len = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+        var startX = from.x + (dx / len) * (card.width / 2 + 10);
+        var startY = from.y + (dy / len) * (card.height / 2 + 10);
+        var arrow = ov.querySelector('#sgx-tour-arrow');
+        arrow.setAttribute('width', String(window.innerWidth));
+        arrow.setAttribute('height', String(window.innerHeight));
+        arrow.setAttribute('viewBox', '0 0 ' + window.innerWidth + ' ' + window.innerHeight);
+        arrow.querySelector('path').setAttribute('d',
+          'M ' + startX + ' ' + startY + ' L ' + to.x + ' ' + to.y);
+        /* наконечник: две короткие линии у цели */
+        var ang = Math.atan2(dy, dx);
+        var h1 = ang + Math.PI * 0.85, h2 = ang - Math.PI * 0.85;
+        var head = arrow.querySelectorAll('path')[1];
+        head.setAttribute('d',
+          'M ' + to.x + ' ' + to.y +
+          ' L ' + (to.x + Math.cos(h1) * 14) + ' ' + (to.y + Math.sin(h1) * 14) +
+          ' L ' + (to.x + Math.cos(h2) * 14) + ' ' + (to.y + Math.sin(h2) * 14) + ' Z');
+      }
+    }
+  }
+
+  function tourEnd() {
+    var ov = document.getElementById('sgx-tour');
+    if (ov) ov.remove();
+    var ask = document.getElementById('sgx-tour-ask');
+    if (ask) ask.remove();
+    tourDone();
+  }
+
   /* Панель живёт внутри бокового меню курса: по кнопке в шапке урока она занимает
      место списка уроков, по крестику уроки возвращаются. Стиль — родной, тёмный
      (как «Методы и функции» в меню), чтобы не выглядеть чужеродной вставкой. */
@@ -4273,9 +4768,8 @@ async function jobCollect(ctx, target) {
       '<div class="sgx-module"><span class="sgx-badge">' + icon('spark', 13) + '</span>',
       '<span class="sgx-modtitle">Задания Stepik</span>',
       '<button class="sgx-close" type="button" title="Закрыть">' + icon('close', 14) + '</button></div>',
-      '<div class="sgx-row"><label>с</label><select id="sgx-from-l"></select></div>',
-      '<div class="sgx-row"><label>по</label><select id="sgx-to-l"></select></div>',
       '<div class="sgx-note" id="sgx-total"></div>',
+      /* Кнопки идут подряд, без промежутков: так они читаются как один список. */
       '<button class="sgx-btn primary" id="sgx-solve" type="button">' + icon('play', 15) +
       'Пройти и отправить</button>',
       '<button class="sgx-btn plain" id="sgx-collect" type="button">' + icon('download', 15) +
@@ -4286,12 +4780,80 @@ async function jobCollect(ctx, target) {
       'Скачать Word ещё раз</button>',
       '<button class="sgx-btn danger" id="sgx-stop" type="button">' + icon('stop', 14) +
       'Остановить</button>',
+      /* Настройки переехали сюда из меню Tampermonkey: там они были спрятаны,
+         а нужны они ровно тогда, когда человек работает с панелью.             */
+      '<button class="sgx-btn plain" id="sgx-set-btn" type="button">' + icon('cog', 15) +
+      'Настройки</button>',
       '<div class="sgx-progress"><div class="sgx-bar" id="sgx-bar"></div></div>',
-      '<div class="sgx-status" id="sgx-status"></div>'
+      '<div class="sgx-status" id="sgx-status"></div>',
+      /* Выбор диапазона вылезает по нажатию «Пройти и отправить»: держать два
+         списка на виду постоянно незачем.                                      */
+      '<div class="sgx-pop" id="sgx-range">',
+      '<h4>Что пройти</h4>',
+      '<div class="sgx-prow"><label>с</label><select id="sgx-from-l"></select></div>',
+      '<div class="sgx-prow"><label>по</label><select id="sgx-to-l"></select></div>',
+      '<div class="sgx-phint">Берутся только шаги с сохранёнными ответами; остальные ' +
+      'пропускаются.</div>',
+      '<button class="sgx-pbtn" id="sgx-range-go" type="button">Начать</button>',
+      '<button class="sgx-pbtn ghost" id="sgx-range-no" type="button">Отмена</button>',
+      '</div>',
+      '<div class="sgx-pop" id="sgx-set">',
+      '<h4>Настройки</h4>',
+      '<div class="sgx-prow"><label>токен</label>' +
+      '<input id="sgx-set-token" type="password" placeholder="нужен, чтобы сохранять ответы"></div>',
+      '<div class="sgx-prow"><label>ключ ИИ</label>' +
+      '<input id="sgx-set-ai" type="password" placeholder="пусто — работаем как есть"></div>',
+      '<div class="sgx-prow"><label>прокси</label>' +
+      '<input id="sgx-set-proxy" type="text" placeholder="пусто — встроенный адрес"></div>',
+      '<div class="sgx-phint">Токен и ключ хранятся только в настройках скрипта на твоём ' +
+      'компьютере и в репозиторий не попадают.</div>',
+      '<button class="sgx-pbtn" id="sgx-set-save" type="button">Сохранить</button>',
+      '<button class="sgx-pbtn ghost" id="sgx-set-back" type="button">Назад</button>',
+      '</div>'
     ].join('');
 
     panel.querySelector('.sgx-close').addEventListener('click', function () { openPanel(false); });
-    panel.querySelector('#sgx-solve').addEventListener('click', function () { beginJob('solve'); });
+    var popRange = panel.querySelector('#sgx-range');
+    var popSet = panel.querySelector('#sgx-set');
+    /* Оба задания — и обход, и сборка — сначала спрашивают диапазон: списки
+       уроков теперь живут только в этом окне, и без вопроса их не выбрать.    */
+    var pendingKind = 'solve';
+    function openRange(kind) {
+      pendingKind = kind;
+      popSet.classList.remove('on');
+      popRange.classList.add('on');
+    }
+    panel.querySelector('#sgx-solve').addEventListener('click', function () { openRange('solve'); });
+    panel.querySelector('#sgx-collect').addEventListener('click', function () { openRange('collect'); });
+    panel.querySelector('#sgx-range-go').addEventListener('click', function () {
+      popRange.classList.remove('on');
+      beginJob(pendingKind);
+    });
+    panel.querySelector('#sgx-range-no').addEventListener('click', function () {
+      popRange.classList.remove('on');
+    });
+    /* Настройки: значения подставляем при открытии, чтобы не показывать их
+       постоянно и не путать человека пустыми полями.                          */
+    panel.querySelector('#sgx-set-btn').addEventListener('click', function () {
+      popRange.classList.remove('on');
+      panel.querySelector('#sgx-set-token').value = cfg.token || '';
+      panel.querySelector('#sgx-set-ai').value = cfg.aiKey || '';
+      panel.querySelector('#sgx-set-proxy').value = (function () {
+        try { return String(GM_getValue('aiProxy', '') || ''); } catch (e) { return ''; }
+      })();
+      popSet.classList.add('on');
+    });
+    panel.querySelector('#sgx-set-save').addEventListener('click', function () {
+      setToken(String(panel.querySelector('#sgx-set-token').value || '').trim());
+      setAiKey(String(panel.querySelector('#sgx-set-ai').value || '').trim());
+      setAiProxy(String(panel.querySelector('#sgx-set-proxy').value || '').trim());
+      popSet.classList.remove('on');
+      renderPanel(true);
+      toast('✓ Настройки сохранены');
+    });
+    panel.querySelector('#sgx-set-back').addEventListener('click', function () {
+      popSet.classList.remove('on');
+    });
     panel.querySelector('#sgx-collect').addEventListener('click', function () { beginJob('collect'); });
     panel.querySelector('#sgx-stop').addEventListener('click', function () { stopJob('остановлено'); });
     panel.querySelector('#sgx-open').addEventListener('click', function () { redownload(); });
@@ -4311,17 +4873,30 @@ async function jobCollect(ctx, target) {
      решение — это код, а код на Stepik живёт в редакторе. Поэтому блок стоит
      прямо под редактором, в области .quiz-plugin, и выглядит как его продолжение:
      вкладка «Код», копирование, сброс, метка языка и выбор модели.              */
+  /* Снимок ленты. Блок живёт в карточке задания, и Stepik может выбросить его
+     из документа — вместе с лентой. Тогда при пересоздании блока человек видел
+     пустой чат, хотя ответ у него есть. Держим разметку ленты и возвращаем её.  */
+  var aiLogSnap = '';
+
+  function snapshotAiLog() {
+    var log = aiLogEl();
+    if (log) aiLogSnap = log.innerHTML;
+    return aiLogSnap;
+  }
+
   function ensureAiRoot() {
     /* Держим ссылку сами. Раньше признаком «блок уже есть» был только поиск по
        документу, а блок, созданный до того, как нашлось место (aiSlot вернул
        null), в документ не попадал — и следующий вызов создавал ВТОРОЙ блок.
-       Теперь элемент всегда один.                                             */
+       Теперь элемент всегда один. И ссылку берём только на живой узел: после
+       перерисовки карточки старый выбрасывается из дерева.                     */
     if (aiRootCache) return aiRootCache;
     var found = document.getElementById('sgx-ai-root');
     if (found) { aiRootCache = found; return found; }
     var root = document.createElement('div');
     root.id = 'sgx-ai-root';
     root.setAttribute('data-sgx-ai', '1');
+    var restoreLog = aiLogSnap;
     root.innerHTML = [
       '<div id="sgx-ai-panel">',
       '<div class="sgx-ai-head">',
@@ -4357,6 +4932,12 @@ async function jobCollect(ctx, target) {
       '</div>',
       '</div>'
     ].join('');
+
+    /* возвращаем прежнюю ленту, если блок пересоздали после перерисовки */
+    if (restoreLog) {
+      var logBox = root.querySelector('#sgx-ai-log');
+      if (logBox) logBox.innerHTML = restoreLog;
+    }
 
     root.querySelector('#sgx-ai-close').addEventListener('click', function () {
       aiShow(false);
@@ -4590,7 +5171,7 @@ async function jobCollect(ctx, target) {
   async function beginJob(kind) {
     var ctx = stepContext();
     if (!ctx) { setStatus('открой любой урок курса на stepik.org'); return; }
-    if (kind === 'solve' && !cfg.token) { setStatus('нужен токен записи — меню → ⚙ Токен записи'); return; }
+    if (kind === 'solve' && !cfg.token) { setStatus('нужен токен записи — панель → Настройки'); return; }
     if (job) {
       setSticky('обход уже идёт — сначала «Остановить»');
       return;
@@ -4649,7 +5230,7 @@ async function jobCollect(ctx, target) {
   /* есть ли на шаге куда вставлять вообще */
   function stepHasInput() {
     return !!($('.CodeMirror') || $('.cm-content') || $('.quiz-component input') ||
-      $('.matching-quiz') ||
+      $('.matching-quiz') || tableQuizTable() ||
       $('.attempt-wrapper__plugin textarea') || $('.attempt-wrapper__plugin input[type="text"]'));
   }
 
@@ -4707,11 +5288,12 @@ async function jobCollect(ctx, target) {
       }
       lastReason = 'сохранено (' + (ans.via || '—') + ')';
       lastOk = { when: nowIso(), key: res.key, via: ans.via || '—' };
-      toast('💾 Сохранено: шаг ' + ctx.step + ' · источник: ' + (ans.via || '—'));
+      /* Уведомления о сохранении нет: индикатор в правом нижнем углу уже
+         превратился в галочку и погас — этого достаточно.                     */
       return res;
     } catch (err) {
       lastErr = err.message + ' · ' + nowIso();
-      toast('⚠ Не сохранилось: ' + err.message + '  → меню → 🧪 Проверка хранилища', true);
+      toast('⚠ Не сохранилось: ' + err.message, true);
       return null;
     }
   }
@@ -4747,9 +5329,15 @@ async function jobCollect(ctx, target) {
     syncToolsButton();
     if (panelOpen()) sidebarSlot();
     /* Блок ИИ перерисовывается вместе с карточкой задания — возвращаем его на
-       место под редактором, иначе он пропадает при смене шага.                 */
-    var aiOpen = !!(aiRootEl() && aiRootEl().classList.contains('on'));
-    if (aiOpen) aiSlot();
+       место под редактором, иначе он пропадает при смене шага. Признак берём не
+       с узла (его могло уже не быть), а из намерения человека: если блок не
+       закрывали, он должен вернуться сам.                                      */
+    if (aiWantOpen) {
+      var aiBox = aiSlot() || aiRootEl();
+      if (aiBox) aiBox.classList.add('on');
+    }
+    /* лента: пока блок на месте — запоминаем её, чтобы пережить перерисовку */
+    if (aiRootEl()) snapshotAiLog();
 
     var ctx = stepContext();
     if (!ctx) { hideChip(); currentKey = null; return; }
@@ -4767,7 +5355,7 @@ async function jobCollect(ctx, target) {
          задание, и читать его как решение текущего нельзя. Само решение не
          выбрасываем — оно привязано к ключу шага, и на прошлом шаге скоба всё
          ещё предложит его открыть.                                            */
-      resetAiForStep(ctx, aiOpen);
+      resetAiForStep(ctx, aiWantOpen);
       /* сменился шаг — самое время подтянуть свежий список (не чаще раза в минуту) */
       if (Date.now() - cache.at > 60000) {
         storeIndex(true).catch(function (e) { log('список не обновился:', e.message); });
@@ -4870,7 +5458,8 @@ async function jobCollect(ctx, target) {
           var head = String(ans.content).split('\n').slice(0, 12).join('\n');
           if (!confirm('Сохранить это в хранилище?\nИсточник: ' + (ans.via || ans.kind) + '\n\n' + head)) return;
           var res = await saveAnswer(ctx, ans, true);
-          toast('💾 Перезаписано: шаг ' + ctx.step + ' (' + res.key + ')');
+          /* Тоже без уведомления: сохранение показывает индикатор в углу. */
+          log('перезаписано вручную: шаг ' + ctx.step + ' (' + res.key + ')');
         } catch (err) { toast('⚠ ' + err.message, true); }
       })();
     } else if (k === 'd') {
@@ -4973,7 +5562,7 @@ async function jobCollect(ctx, target) {
   }
 
   async function diagnose() {
-    if (!cfg.token) { toast('⚠ Токен записи не задан — меню → ⚙ Токен записи', true); return; }
+    if (!cfg.token) { toast('⚠ Токен записи не задан — панель → Настройки', true); return; }
     try {
       var items = await storeIndex(true);
       var who = await fetch(API, { headers: ghHeaders() });
@@ -5003,78 +5592,11 @@ async function jobCollect(ctx, target) {
       selfTest().catch(function (err) { toast('⚠ ' + err.message, true); });
     });
 
-    GM_registerMenuCommand('📄 Пройти задания / собрать в Word', function () {
-      openPanel(true);
-    });
-
-    GM_registerMenuCommand('✨ ИИ: решить текущий шаг', function () {
-      askAi();
-    });
-
-    GM_registerMenuCommand('📋 Показать решение от ИИ', function () {
-      if (!aiAnswer || !aiAnswer.text) { toast('ИИ ещё ничего не присылал на этом шаге'); return; }
-      /* Блок ИИ живёт в карточке задания, а не в боковом меню, поэтому показываем
-         его независимо от того, открылась ли панель настроек: раньше отказ
-         openPanel() уносил с собой и решение.                                   */
-      openPanel(true, true);
-      aiShow(true);
-      aiLogClear();
-      aiLogAdd('Шаг ' + (aiAnswer.key || stepContext().key || '') + '. Вот что я решил.', 'sys');
-      aiLogAnswer();
-      renderPanel(true);
-    });
-
-    GM_registerMenuCommand('🔑 Настройки ИИ', function () {
-      /* Ключ в поле НЕ подставляем: раньше он показывался прямо в диалоге, и это
-         было видно на экране. Теперь только говорим, что ключ уже есть.        */
-      var has = !!aiKey();
-      var k = prompt('Ключ доступа к ИИ.\n' +
-        (has
-          ? 'Ключ уже сохранён. Введи новый, чтобы заменить, или оставь поле пустым\n' +
-            'и подтверди — тогда ключ будет убран и ИИ выключится совсем.\n'
-          : 'Пусто — ИИ выключен.\n') +
-        'Ключ хранится только в настройках скрипта на твоём компьютере\n' +
-        'и в репозиторий не попадает.', '');
-      if (k === null) return;
-      var val = String(k).trim();
-      if (!val && has) {
-        var sure = true;
-        try { sure = confirm('Убрать сохранённый ключ? ИИ выключится совсем.'); } catch (e) { sure = true; }
-        if (!sure) return;
-      }
-      setAiKey(val);
-      toast(val ? '✓ Ключ сохранён' : '✓ Ключ убран — ИИ выключен');
-    });
-
-    GM_registerMenuCommand('🌐 Прокси ИИ (если есть)', function () {
-      /* Адрес уже вписан в скрипт и работает сам. Здесь его можно заменить
-         своим или выключить прокси совсем. Сам адрес в поле не подставляем.  */
-      var own = null;
-      try { own = GM_getValue('aiProxy', null); } catch (e) { own = null; }
-      var custom = own !== null && own !== undefined && String(own).length;
-      var u = prompt('Свой прокси, если он у тебя есть.\n' +
-        (custom
-          ? 'Сейчас задан свой адрес. Введи новый, чтобы заменить, или оставь\n' +
-            'поле пустым и подтверди — тогда вернёмся к встроенному прокси.\n'
-          : 'Сейчас работает встроенный прокси, настраивать ничего не нужно.\n') +
-        'Чтобы выключить прокси совсем и ходить напрямую, введи «нет».\n' +
-        'Как поднять свой прокси: server/AI-PROXY.md', '');
-      if (u === null) return;
-      var val = String(u).trim();
-      if (/^нет$/i.test(val)) {
-        setAiProxy('');
-        toast('✓ Прокси выключен — работаем напрямую');
-        return;
-      }
-      if (!val) {
-        if (!custom) { toast('Адрес не менялся — работает встроенный прокси'); return; }
-        setAiProxy('');
-        toast('✓ Свой адрес убран — вернулись к встроенному прокси');
-        return;
-      }
-      setAiProxy(val);
-      toast('✓ Свой прокси задан');
-    });
+    /* Пять пунктов убраны намеренно: «Пройти задания / собрать в Word»,
+       «ИИ: решить текущий шаг», «Показать решение от ИИ», «Настройки ИИ» и
+       «Прокси ИИ» дублировали то, что и так есть на странице. Панель заданий
+       открывается кнопкой в шапке урока, ИИ — кнопкой «ИИ» в скобе у задания,
+       а настройки переехали в саму панель, где они и нужны.                    */
 
     GM_registerMenuCommand('🔄 Обновить список ответов', function () {
       storeIndex(true)
@@ -5103,7 +5625,7 @@ async function jobCollect(ctx, target) {
     }
 
     if (!cfg.token) {
-      toast('⚠ Укажите токен записи: меню Tampermonkey → ⚙ Токен записи', true);
+      toast('⚠ Укажите токен записи: панель → Настройки', true);
     }
     storeIndex(false)
       .then(function () { renderPanel(true); })
@@ -5111,6 +5633,14 @@ async function jobCollect(ctx, target) {
 
     setInterval(tick, 1500);
     setInterval(function () { if (chipAnchor) positionChip(chipAnchor); }, 500);
+
+    /* Первое знакомство: один раз, и только когда человек уже на странице урока —
+       иначе подсказка показывала бы на элементы, которых ещё нет.               */
+    if (tourNeeded()) {
+      setTimeout(function () {
+        if (stepContext()) tourAsk();
+      }, 2500);
+    }
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
