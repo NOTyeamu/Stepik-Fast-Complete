@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.21.0
+// @version      6.22.0
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам: показывает варианты в чате кружками или квадратами, отмечает нужные, а при отказе проверки берёт другой вариант. Задания со свободным ответом в поле тоже решаются. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Запросы идут через прокси, а ключ доступа живёт только на сервере — в браузер он не попадает вообще. Расход ограничен суточным лимитом. Свой ключ или свой прокси можно вписать в настройках. Если общий упрётся в лимит, скрипт скажет об этом прямо. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -65,7 +65,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.21.0';
+  var VERSION = '6.22.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -1020,9 +1020,12 @@
     'color:rgba(255,255,255,.55);line-height:1.45}',
     /* Кнопки — во всю ширину, квадратные и вплотную друг к другу: человек просил
        убрать скругления и промежутки. Разделяет их только тонкая линия.         */
-    '#sgx-panel .sgx-btn{display:flex;align-items:center;justify-content:center;gap:var(--sgx-s2);',
+    /* Значки — у левого края, одной колонкой: человек просил, чтобы они стояли
+       «у стены» и ровно друг под другом, а не плавали по центру кнопки.       */
+    '#sgx-panel .sgx-btn{display:flex;align-items:center;justify-content:flex-start;',
+    'gap:var(--sgx-s3);',
     'width:100%;margin:0;height:50px;border:0;border-top:1px solid rgba(255,255,255,.10);',
-    'border-radius:0;padding:0;',
+    'border-radius:0;padding:0 var(--sgx-s4);',
     'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;',
     'font-size:var(--sgx-f-sm);font-weight:500;cursor:pointer;letter-spacing:.2px;',
     'transition:background .15s ease,color .15s ease}',
@@ -1036,7 +1039,9 @@
     '#sgx-panel .sgx-btn.ai:hover{background:rgba(185,196,255,.12)}',
     '#sgx-panel .sgx-btn:disabled{opacity:.4;cursor:default;background:rgba(255,255,255,.06);color:#fff;',
     'border-color:rgba(255,255,255,.10)}',
-    '#sgx-panel .sgx-ic{flex:0 0 auto}',
+    '#sgx-panel .sgx-ic{flex:0 0 auto;display:flex;align-items:center;justify-content:center;',
+    'width:22px;height:22px}',
+    '#sgx-panel .sgx-btn>span:last-child{flex:1 1 auto;text-align:left}',
     /* --- всплывающее окно выбора диапазона и экран настроек --- */
     '#sgx-panel .sgx-pop{position:absolute;inset:0;z-index:5;display:none;',
     'flex-direction:column;justify-content:center;gap:var(--sgx-s3);',
@@ -1142,14 +1147,26 @@
     ':where(#sgx-ai-panel) :where(.s-radio__border){border-radius:50%}',
     ':where(#sgx-ai-panel) :where(.s-checkbox__border){border-radius:4px}',
     ':where(#sgx-ai-panel) :where(.s-checkbox__circle, .s-radio__circle){position:absolute;inset:0}',
-    /* Центрируем содержимое метки сами: у Stepik кружок позиционируется своими
-       правилами, и в нашем блоке он вставал не по центру. Флекс надёжнее —
-       он центрирует и кружок, и галочку, чем бы они ни были нарисованы.        */
+    /* Состояние меток задаём САМИ. Раньше вид «не выбрано» брался у Stepik, но
+       их правила к нашему блоку не подходят — и в чате выглядели выбранными все
+       кружки сразу. Здесь описаны оба состояния целиком, поэтому отметка одна. */
     '#sgx-ai-panel .s-radio__border, #sgx-ai-panel .s-checkbox__border',
-    '{display:flex;align-items:center;justify-content:center;position:relative}',
+    '{display:flex;align-items:center;justify-content:center;position:relative;',
+    'border:2px solid #B4B2A9;background:#fff}',
+    '#sgx-ai-panel .s-radio__border{border-radius:50%}',
+    '#sgx-ai-panel .s-checkbox__border{border-radius:4px}',
+    /* пустое состояние: ни точки, ни галочки */
+    '#sgx-ai-panel .s-radio__circle, #sgx-ai-panel .s-checkbox__circle',
+    '{position:static;width:0;height:0;border:0;background:transparent}',
+    /* выбранный кружок — точкой по центру */
     '#sgx-ai-panel .s-radio__input:checked ~ .s-radio__border{border-color:#2E7D32}',
     '#sgx-ai-panel .s-radio__input:checked ~ .s-radio__border .s-radio__circle',
-    '{position:static;width:8px;height:8px;border-radius:50%;background:#2E7D32}',
+    '{width:8px;height:8px;border-radius:50%;background:#2E7D32}',
+    /* выбранный квадратик — галочкой на зелёном */
+    '#sgx-ai-panel .s-checkbox__input:checked ~ .s-checkbox__border',
+    '{border-color:#2E7D32;background:#2E7D32}',
+    '#sgx-ai-panel .s-checkbox__input:checked ~ .s-checkbox__border .s-checkbox__circle',
+    '{width:5px;height:10px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}',
     ':where(#sgx-ai-panel) :where(.s-checkbox__input:checked ~ .s-checkbox__border)',
     '{border-color:#2E7D32;background:#2E7D32}',
     /* галочка: без неё пустой зелёный квадрат читается как «залито непонятно чем» */
@@ -1328,6 +1345,19 @@
 
   /* Скоба рисуется, а не просто появляется: путь обводится от начала к концу.
      Длину берём у самого пути — она зависит от высоты блока.                   */
+  /* Пересчитать длину штриха под новый путь, не перерисовывая скобку заново.
+     Нужно, когда карточка изменила высоту: старый strokeDasharray не покрывал
+     новый путь, и линия выглядела разорванной.                                 */
+  function syncBrace(path) {
+    if (!path) return;
+    var len = 0;
+    try { len = path.getTotalLength ? path.getTotalLength() : 0; } catch (e) { len = 0; }
+    if (!len) return;
+    path.style.transition = 'none';
+    path.style.strokeDasharray = String(len);
+    path.style.strokeDashoffset = '0';
+  }
+
   function drawBrace(path) {
     if (!path) return;
     var len = 0;
@@ -1335,8 +1365,7 @@
     if (!len) return;                       /* в тестах длины может не быть */
     path.style.transition = 'none';
     path.style.strokeDasharray = String(len);
-    path.style.strokeDashoffset = String(len);
-    var kick = function () {
+    path.style.strokeDashoffset = String(len);    var kick = function () {
       path.style.transition = 'stroke-dashoffset .5s ease-out';
       path.style.strokeDashoffset = '0';
     };
@@ -1437,6 +1466,12 @@
         if (chip.getAttribute('data-drawn') !== '1') {
           chip.setAttribute('data-drawn', '1');
           drawBrace(path);
+        } else {
+          /* Длина пути изменилась (карточка выросла после провала проверки), а
+             штрих остался прежней длины — скобка разваливалась на куски. Длину
+             штриха пересчитываем, но без повторной анимации: иначе она мигала
+             бы на каждом обновлении.                                          */
+          syncBrace(path);
         }
       }
     }
@@ -1701,9 +1736,18 @@ var ICONS = {
       '<line x1="14" y1="11" x2="14" y2="17"/>',
     /* иконки моделей: у каждой модели свой значок в списке выбора */
     bolt: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
-    /* шестерёнка для кнопки настроек */
-    cog: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1' +
-      'M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>',
+    /* Шестерёнка для кнопки настроек: та же форма, что у иконок Feather —
+       прежняя была из палочек и читалась как «что-то непонятное».             */
+    cog: '<circle cx="12" cy="12" r="3.2"/>' +
+      '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06' +
+      'a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09' +
+      'A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06' +
+      'A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09' +
+      'A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06' +
+      'A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09' +
+      'a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06' +
+      'A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09' +
+      'a1.65 1.65 0 0 0-1.51 1z"/>',
     chip: '<rect x="6" y="6" width="12" height="12" rx="2"/>' +
       '<path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
     gem: '<path d="M6 3h12l4 6-10 12L2 9z"/><path d="M2 9h20M9 3l3 18M15 3l-3 18"/>',
@@ -4629,15 +4673,23 @@ async function jobCollect(ctx, target) {
      шага в TOUR_STEPS достаточно, чтобы он попал в инструкцию.                 */
   var TOUR_KEY = 'tourDone';
 
+  /* У каждого шага есть prepare: он показывает то, на что указывает стрелка.
+     Раньше панель и блок ИИ на этом моменте были закрыты, элемент не находился —
+     и человек видел карточку с текстом без стрелки: «о чём это, непонятно».    */
   var TOUR_STEPS = [
-    { target: '#sgx-tools-btn', title: 'Панель заданий',
-      text: 'Вот она — кнопка в шапке урока. Открывает список заданий: пройти их подряд и собрать в документ Word.' },
-    { target: '#sgx-chip', title: 'Скоба «есть решение»',
-      text: 'У задания с готовым ответом появляется скоба: «вставить» подставит ответ, «нет» уберёт её, «ИИ» откроет чат.' },
+    { target: '#sgx-tools-btn', title: 'Кнопка панели',
+      text: 'Вот она — в шапке урока, рядом с полноэкранным режимом. Открывает панель заданий.' },
+    { target: '#sgx-panel', title: 'Панель заданий',
+      prepare: function () { openPanel(true); },
+      text: 'Пройти задания подряд и собрать их в документ Word. Кнопки идут одна под другой.' },
+    { target: '#sgx-set-btn', title: 'Настройки',
+      prepare: function () { openPanel(true); },
+      text: 'В самом низу панели. Токен записи, ключ ИИ и адрес прокси — всё хранится на твоём компьютере.' },
     { target: '#sgx-ai-root', title: 'Чат с ИИ',
+      prepare: function () { aiShow(true); },
       text: 'Здесь ИИ решает задание: печатает код прямо в редактор, сам запускает его и исправляет, если проверка не приняла.' },
-    { target: '#sgx-panel', title: 'Настройки',
-      text: 'Диапазон заданий, сборка в Word и настройки — всё в панели. Кнопка «Настройки» внизу.' }
+    { target: '#sgx-chip', title: 'Скоба у задания', optional: true,
+      text: 'У задания с готовым ответом появляется скоба: «вставить» подставит ответ, «ИИ» откроет чат.' }
   ];
 
   function tourNeeded() {
@@ -4679,6 +4731,19 @@ async function jobCollect(ctx, target) {
   function tourStart(i) {
     var step = TOUR_STEPS[i];
     if (!step) { tourEnd(); return; }
+
+    /* Сначала показываем то, о чём шаг, и только потом меряем его положение. */
+    if (step.prepare) {
+      try { step.prepare(); } catch (e) { log('знакомство: шаг не подготовился — ' + e.message); }
+    }
+    var el0 = null;
+    try { el0 = document.querySelector(step.target); } catch (e) { el0 = null; }
+    if (!el0) {
+      /* цели нет (например, у задания ещё нет готового ответа) — шаг пропускаем,
+         чтобы не показывать карточку без стрелки */
+      tourStart(i + 1);
+      return;
+    }
 
     var old = document.getElementById('sgx-tour');
     if (old) old.remove();
@@ -4754,6 +4819,11 @@ async function jobCollect(ctx, target) {
     if (ov) ov.remove();
     var ask = document.getElementById('sgx-tour-ask');
     if (ask) ask.remove();
+    /* Убираем за собой: знакомство само открывало панель и блок ИИ, но оставлять
+       их раскрытыми после подсказки неправильно. Пустой блок закрываем, а с
+       готовым ответом — оставляем: его человек и хотел видеть.                 */
+    try { openPanel(false, true); } catch (e) { /* ignore */ }
+    if (!aiAnswer) { try { aiShow(false); } catch (e2) { /* ignore */ } }
     tourDone();
   }
 
@@ -4780,12 +4850,13 @@ async function jobCollect(ctx, target) {
       'Скачать Word ещё раз</button>',
       '<button class="sgx-btn danger" id="sgx-stop" type="button">' + icon('stop', 14) +
       'Остановить</button>',
-      /* Настройки переехали сюда из меню Tampermonkey: там они были спрятаны,
-         а нужны они ровно тогда, когда человек работает с панелью.             */
-      '<button class="sgx-btn plain" id="sgx-set-btn" type="button">' + icon('cog', 15) +
-      'Настройки</button>',
       '<div class="sgx-progress"><div class="sgx-bar" id="sgx-bar"></div></div>',
       '<div class="sgx-status" id="sgx-status"></div>',
+      /* Настройки переехали сюда из меню Tampermonkey: там они были спрятаны, а
+         нужны ровно тогда, когда человек работает с панелью. Стоят САМОЙ
+         последней кнопкой — в самом низу панели.                              */
+      '<button class="sgx-btn plain" id="sgx-set-btn" type="button">' + icon('cog', 17) +
+      'Настройки</button>',
       /* Выбор диапазона вылезает по нажатию «Пройти и отправить»: держать два
          списка на виду постоянно незачем.                                      */
       '<div class="sgx-pop" id="sgx-range">',
