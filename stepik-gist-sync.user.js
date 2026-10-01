@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.18.0
+// @version      6.19.0
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам: показывает варианты в чате кружками или квадратами, отмечает нужные, а при отказе проверки берёт другой вариант. Задания со свободным ответом в поле тоже решаются. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Запросы идут через прокси, а ключ доступа живёт только на сервере — в браузер он не попадает вообще. Расход ограничен суточным лимитом. Свой ключ или свой прокси можно вписать в настройках. Если общий упрётся в лимит, скрипт скажет об этом прямо. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -65,7 +65,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.18.0';
+  var VERSION = '6.19.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -230,7 +230,14 @@
     if (mine) return mine;
 
     var it = cacheIndex()[key];
-    if (!it) throw new Error('в хранилище нет ответа для ' + key);
+    if (!it) {
+      /* В папке ответа ещё нет — он уезжает туда только после верной проверки.
+         Тогда отдаём то, что ИИ решил на этом шаге: оно уже в памяти, и кнопка
+         «вставить» должна работать, не дожидаясь публикации.                   */
+      var fresh = aiItemFromMemory(key, null);
+      if (fresh) return fresh;
+      throw new Error('в хранилище нет ответа для ' + key);
+    }
 
     var res = null;
     try {
@@ -259,7 +266,7 @@
   /* Решение ИИ, которое ещё не доехало до answers/, но лежит в памяти. Для теста
      с выбором текст модели — это «2. Вариант такой-то», а вставка ждёт те же
      варианты, что и автосохранение, поэтому приводим его к JSON тем же способом,
-     что и saveAiToStore. Без этого «вставить» на тесте с выбором падал бы на
+     что и автосохранение. Без этого «вставить» на тесте с выбором падал бы на
      JSON.parse, хотя ответ у нас на руках.                                      */
   function aiItemFromMemory(key, it) {
     var text = aiAnswerAt(key);
@@ -269,6 +276,11 @@
       var picked = choiceFromText(text);
       if (!picked) return null;
       return { key: key, kind: 'choice', content: JSON.stringify(picked), local: true };
+    }
+    if (kind === 'matching') {
+      var order = matchingFromText(text);
+      if (!order) return null;
+      return { key: key, kind: 'matching', content: JSON.stringify({ order: order }), local: true };
     }
     return { key: key, kind: kind, content: text, local: true };
   }
@@ -718,6 +730,10 @@
       ' .quiz-plugin__content input:not([disabled])');
     if (q) el = q.closest('.quiz-component, .quiz-plugin__content') || q;
     if (!el) {
+      var mq = $('.matching-quiz');
+      if (mq && mq.getBoundingClientRect().height) el = mq;
+    }
+    if (!el) {
       var cm = $('.CodeMirror');
       if (cm && cm.getBoundingClientRect().height) el = cm;
     }
@@ -814,6 +830,17 @@
       var data = null;
       try { data = JSON.parse(saved.content); } catch (e) { data = null; }
       res = data ? writeChoice(data) : { ok: false, error: 'битая запись ответа ' + saved.key };
+    } else if (saved.kind === 'matching') {
+      var mdata = null;
+      try { mdata = JSON.parse(saved.content); } catch (e) { mdata = null; }
+      var order = mdata && mdata.order;
+      if (!order || !order.length) {
+        res = { ok: false, error: 'битая запись ответа ' + saved.key };
+      } else {
+        await orderMatching(order);
+        aiLogMatching(order);
+        res = { ok: true, moved: true };
+      }
     } else {
       res = await writeCode(saved.content);
     }
@@ -986,6 +1013,9 @@
     '#sgx-ai-panel .sgx-ai-opt.on .s-checkbox__label,',
     '#sgx-ai-panel .sgx-ai-opt.on .s-radio__label{font-weight:600;color:#1F1D1B}',
     '#sgx-ai-panel .sgx-ai-optnote{margin-top:2px;font-size:var(--sgx-f-xs);color:var(--sgx-fg-dim)}',
+    /* строка сопоставления: подпись слева, значение справа */
+    '#sgx-ai-panel .sgx-ai-opttext{font-size:var(--sgx-f-sm);color:#4B4A47}',
+    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-opttext{color:#1F1D1B}',
     /* Запасной вариант на случай, если стили Stepik до блока не достают.
        Специфичность нулевая (:where), поэтому их правила всегда важнее — наши
        включаются только тогда, когда рисовать метку больше нечем.              */
@@ -998,16 +1028,19 @@
     ':where(#sgx-ai-panel) :where(.s-radio__border){border-radius:50%}',
     ':where(#sgx-ai-panel) :where(.s-checkbox__border){border-radius:4px}',
     ':where(#sgx-ai-panel) :where(.s-checkbox__circle, .s-radio__circle){position:absolute;inset:0}',
-    ':where(#sgx-ai-panel) :where(.s-radio__input:checked ~ .s-radio__border)',
-    '{border-color:#2E7D32}',
-    ':where(#sgx-ai-panel) :where(.s-radio__input:checked ~ .s-radio__border .s-radio__circle)',
-    '{margin:3px;border-radius:50%;background:#2E7D32}',
+    /* Центрируем содержимое метки сами: у Stepik кружок позиционируется своими
+       правилами, и в нашем блоке он вставал не по центру. Флекс надёжнее —
+       он центрирует и кружок, и галочку, чем бы они ни были нарисованы.        */
+    '#sgx-ai-panel .s-radio__border, #sgx-ai-panel .s-checkbox__border',
+    '{display:flex;align-items:center;justify-content:center;position:relative}',
+    '#sgx-ai-panel .s-radio__input:checked ~ .s-radio__border{border-color:#2E7D32}',
+    '#sgx-ai-panel .s-radio__input:checked ~ .s-radio__border .s-radio__circle',
+    '{position:static;width:8px;height:8px;border-radius:50%;background:#2E7D32}',
     ':where(#sgx-ai-panel) :where(.s-checkbox__input:checked ~ .s-checkbox__border)',
     '{border-color:#2E7D32;background:#2E7D32}',
     /* галочка: без неё пустой зелёный квадрат читается как «залито непонятно чем» */
     ':where(#sgx-ai-panel) :where(.s-checkbox__input:checked ~ .s-checkbox__border .s-checkbox__circle)',
-    '{position:absolute;left:5px;top:1px;width:5px;height:10px;border:solid #fff;',
-    'border-width:0 2px 2px 0;transform:rotate(45deg)}',
+    '{width:5px;height:10px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}',
     /* нижняя полоса блока: главное действие — спросить ИИ */
     '#sgx-ai-panel .sgx-ai-foot{display:flex;padding:var(--sgx-s3) var(--sgx-s4);',
     'border-top:1px solid var(--sgx-bd);background:#fff}',
@@ -2591,9 +2624,81 @@ async function jobCollect(ctx, target) {
   function stepKindNow() {
     if ($('.CodeMirror, .cm-content')) return 'code';
     if ($('.string-quiz__textarea')) return 'text';
+    if ($('.matching-quiz')) return 'matching';
     if ($('.quiz-component input[type="radio"], .quiz-component input[type="checkbox"]')) return 'choice';
     if ($('.attempt-wrapper__plugin textarea')) return 'code';
     return 'text';
+  }
+
+  /* ============================================ задание на сопоставление */
+
+  /* Так выглядит «Сопоставьте часть метода с её назначением»: слева список
+     подписей, справа список значений, которые надо расставить в том же
+     порядке. Перетаскивать мышью не нужно: у каждого элемента справа есть
+     кнопки «выше»/«ниже» с подписью Move up / Move down — ими и упорядочиваем. */
+
+  function matchItems(sel) {
+    return $$(sel + ' .matching-quiz__item').map(function (it) {
+      var c = it.querySelector('.dnd-quiz__item-content') || it;
+      return norm(c.textContent || '');
+    }).filter(function (t) { return !!t; });
+  }
+
+  function matchingLeft() { return matchItems('.matching-quiz__left'); }
+  function matchingRight() { return matchItems('.matching-quiz__right'); }
+
+  /* Разбираем ответ модели: он должен вернуть правый столбец в нужном порядке,
+     по одному элементу в строке. Возвращаем порядок целиком — если не хватает
+     одного элемента, дописываем его сами: место у него остаётся единственное.  */
+  function matchingFromText(text) {
+    var items = matchingRight();
+    if (items.length < 2) return null;
+
+    var lines = String(text || '').split('\n').map(function (l) {
+      return norm(l).replace(/^[-*•·]\s*/, '').replace(/^\d+\s*[).:—-]\s*/, '').trim();
+    }).filter(function (l) { return l.length > 1; });
+
+    var want = [];
+    lines.forEach(function (l) {
+      var hit = null;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].toLowerCase() === l.toLowerCase()) { hit = items[i]; break; }
+      }
+      if (hit && want.indexOf(hit) < 0) want.push(hit);
+    });
+
+    /* Одного не хватает — дописываем: он встанет на единственное свободное место. */
+    if (want.length === items.length - 1) {
+      var rest = items.filter(function (t) { return want.indexOf(t) < 0; });
+      if (rest.length === 1) want.push(rest[0]);
+    }
+    if (want.length !== items.length) return null;
+    return want;
+  }
+
+  /* Расставляем элементы в нужном порядке кнопками «выше». Простой выбор:
+     идём по нужному порядку и поднимаем каждый элемент на его место.           */
+  async function orderMatching(want) {
+    var moved = 0;
+    for (var i = 0; i < want.length; i++) {
+      var items = $$('.matching-quiz__right .matching-quiz__item');
+      var from = -1;
+      for (var j = i; j < items.length; j++) {
+        var c = items[j].querySelector('.dnd-quiz__item-content') || items[j];
+        if (norm(c.textContent || '') === want[i]) { from = j; break; }
+      }
+      if (from < 0) continue;
+      while (from > i) {
+        var cur = $$('.matching-quiz__right .matching-quiz__item');
+        var btn = cur[from] && cur[from].querySelector('[aria-label^="Move up"]');
+        if (!btn || btn.disabled) break;
+        btn.click();
+        moved++;
+        await sleep(200);
+        from--;
+      }
+    }
+    return moved;
   }
 
   /* Варианты ответа теста. В условии их НЕТ: вопрос лежит в тексте задания, а
@@ -2628,6 +2733,18 @@ async function jobCollect(ctx, target) {
         'одну строку, без пояснений, без markdown, без кавычек и без точки в конце.\n' +
         '1. Отвечай ровно на вопрос и тем же языком, что и вопрос.\n' +
         '2. Пиши так, как ответил бы студент этого урока: коротко и по делу.';
+    }
+    if (kind === 'matching') {
+      return 'Реши задание на сопоставление со Stepik. Слева список подписей в нужном ' +
+        'порядке, справа список значений, которые надо расставить ТАК ЖЕ — чтобы ' +
+        'напротив каждой подписи слева оказалось подходящее значение.\n' +
+        'Верни ТОЛЬКО правые значения в нужном порядке, по одному в строке, ровно так, ' +
+        'как они написаны, без нумерации, без пояснений и без markdown.\n' +
+        '1. Строк должно быть столько же, сколько элементов справа: ни одной лишней ' +
+        'и ни одной пропущенной.\n' +
+        '2. Порядок строк — это и есть ответ. Первая строка встанет напротив первой ' +
+        'подписи слева, вторая — напротив второй, и так далее.\n' +
+        '3. Никакого кода писать не нужно.';
     }
     if (kind === 'choice') {
       return 'Реши тест со Stepik. Верни ТОЛЬКО текст выбранного варианта — ровно так, ' +
@@ -2694,6 +2811,25 @@ async function jobCollect(ctx, target) {
     var kind = kindIn || stepKindNow();
     var lang = stepLanguage();
     var task = stepPrompt();
+
+    /* Сопоставление: отдаём оба столбца как есть. Левый — в порядке страницы,
+       правый — как он стоит сейчас, чтобы модель видела, что переставлять.     */
+    if (kind === 'matching') {
+      var left = matchingLeft();
+      var right = matchingRight();
+      var mbase = aiLessonBlock() + '\nЗадание на сопоставление. Нужно расставить правый ' +
+        'столбец так, чтобы напротив каждой подписи слева оказалось подходящее значение.\n\n' +
+        'Вопрос:\n' + task + '\n\nЛевый столбец (в нужном порядке):\n' +
+        left.map(function (t, i) { return (i + 1) + ') ' + t; }).join('\n') +
+        '\n\nПравый столбец (переставить):\n' +
+        right.map(function (t) { return '— ' + t; }).join('\n') +
+        '\n\nВерни правые значения в нужном порядке, по одному в строке.';
+      if (ctx && ctx.checkError) {
+        mbase += '\n\nЧто ответила проверка:\n' + String(ctx.checkError).slice(0, 1200) +
+          '\nРазберись, что перепутано, и верни порядок заново.';
+      }
+      return mbase;
+    }
 
     /* Тест с выбором собираем иначе: вариантов в условии нет, они отдельным
        блоком, и про stdin/stdout говорить нечего.                             */
@@ -3115,10 +3251,12 @@ async function jobCollect(ctx, target) {
       }
 
       setStatus((fixed ? 'ИИ: исправленное решение готово (шаг ' : 'ИИ: решение готово (шаг ') + ctx.step + ')');
-      /* Кладём решение в общее хранилище — иначе кнопка «вставить» ищет ответ в
-         папке answers/, не находит и отвечает «в хранилище нет ответа». Заодно
-         решение уезжает остальным. Тихо: неудача публикации не должна ломать показ. */
-      saveAiToStore(ctx).catch(function (e) { log('публикация решения ИИ не удалась: ' + e.message) });
+      /* В общую папку НЕ публикуем. Раньше публиковали сразу, и получалось две
+         беды: в папке оседали непроверенные ответы (а значит и скоба «есть
+         решение» появлялась под решением, которое ещё не приняли), и у людей
+         оказывался мусор вместо выверенных ответов. Ответ уезжает в папку
+         только после того, как проверка его приняла — см. перехват отправки.
+         Кнопке «вставить» публикация и не нужна: она берёт ответ из памяти.  */
     } catch (e) {
       dropThink(thinking);
       aiLogAdd(e.message, 'err');
@@ -3214,7 +3352,6 @@ async function jobCollect(ctx, target) {
     /* Исправленный код тоже вставляем и запускаем: иначе человек вручную
        переносит то, что скрипт и так держит в руках. Отправку не жмём.         */
     autoApply(ctx).catch(function (e) { log('автовставка правки не удалась: ' + (e && e.message)); });
-    saveAiToStore(ctx).catch(function (e) { log('публикация правки ИИ не удалась: ' + e.message); });
     return { fixed: true };
   }
 
@@ -3381,11 +3518,27 @@ async function jobCollect(ctx, target) {
 
     /* Вид берём из ответа: 'text' — свободный ответ в поле, его нельзя сводить
        к 'code', иначе он уходит по ветке редактора и в ленте пишется про код. */
-    var kind = aiAnswer.kind === 'choice' ? 'choice'
-      : (aiAnswer.kind === 'text' ? 'text' : 'code');
+    var kind = (aiAnswer.kind === 'choice' || aiAnswer.kind === 'text' ||
+      aiAnswer.kind === 'matching') ? aiAnswer.kind : 'code';
     var target = insertTarget();
 
     var res;
+    /* Сопоставление: расставляем правый столбец в порядке из ответа. */
+    if (kind === 'matching') {
+      var want = matchingFromText(aiAnswer.text);
+      if (!want) {
+        aiLogAdd('Не разобрал порядок — расставь значения сам, пожалуйста. ' +
+          'Список значений выше в чате.', 'sys');
+        return { skipped: 'порядок не распознан' };
+      }
+      var moved = await orderMatching(want);
+      aiLogAdd(moved
+        ? 'Расставил значения в нужном порядке. Осталось нажать «Отправить на проверку».'
+        : 'Порядок уже был верным. Осталось нажать «Отправить на проверку».', 'sys');
+      if (target) flash(target.anchor);
+      return { inserted: true, ran: false, kind: 'matching' };
+    }
+
     if (kind === 'choice') {
       var picked = choiceFromText(aiAnswer.text);
       if (!picked) {
@@ -3453,52 +3606,6 @@ async function jobCollect(ctx, target) {
     if (out) aiLogOutput(out);
     else aiLogAdd('Вывод запуска не увидел — посмотри сам в панели запуска.', 'sys');
     return { inserted: true, ran: true };
-  }
-
-  /* Решение ИИ уезжает в общее хранилище: иначе кнопка «вставить» ищет ответ
-     в папке answers/ и отвечает «в хранилище нет ответа для <ключ>». Заодно
-     решение становится доступно остальным. Для теста с выбором ответ приходит
-     текстом, поэтому приводим его к тому же виду, что и автосохранение.         */
-  async function saveAiToStore(ctx) {
-    if (!aiAnswer || aiAnswer.key !== ctx.key || !aiAnswer.text) return { skipped: true };
-    if (!cfg.token) return { skipped: true };          /* без токена публиковать некуда */
-    /* Обрезанный ответ не публикуем: он уедет всем, и на этом шаге в папке
-       останется огрызок вроде «def». Огрызок хуже, чем ничего.                  */
-    if (aiAnswer.truncated) {
-      log('решение ИИ обрезано по лимиту — в хранилище не кладу');
-      return { skipped: 'ответ обрезан' };
-    }
-    /* Размышления вместо ответа в общую папку тоже не кладём: это не решение,
-       а чужая стенография мыслей, и она останется там навсегда.               */
-    if (looksLikeReasoning(aiAnswer.text)) {
-      log('в ответе ИИ одни размышления, а не решение — в хранилище не кладу');
-      return { skipped: 'размышления вместо ответа' };
-    }
-    var kind = aiAnswer.kind === 'choice' ? 'choice'
-      : (aiAnswer.kind === 'text' ? 'text' : 'code');
-    var content = aiAnswer.text;
-    /* У теста с выбором ответ модели — текст, а хранилищу нужны варианты. Если
-       сопоставить не вышло, это не повод класть мусор: говорим честно.            */
-    if (kind === 'choice') {
-      var picked = choiceFromText(content);
-      if (!picked) {
-        log('решение ИИ для теста с выбором не сопоставилось с вариантами — в хранилище не кладу');
-        return { skipped: 'варианты не распознаны' };
-      }
-      content = JSON.stringify(picked);
-    }
-    /* Расширение выбирает вид ответа, а не язык: у теста с выбором это всегда .json
-       (иначе файл ложился как .txt и «вставить» его не находил).                   */
-    var ext = kind === 'choice' ? 'json'
-      : (kind === 'text' ? 'txt' : extOf(aiAnswer.lang || ''));
-    var res = await saveAnswer(ctx, {
-      kind: kind, ext: ext, content: content
-    }, true);
-    if (res && res.key) {
-      aiAnswer.saved = { key: res.key, kind: kind };
-      saveAi();
-    }
-    return res;
   }
 
   /* --------------------------------------------------------- лента решения ИИ */
@@ -3796,6 +3903,34 @@ async function jobCollect(ctx, target) {
     return box;
   }
 
+  /* Сопоставление в ленте: показываем пары «подпись → значение», а не список
+     значений. Человеку нужно видеть, что с чем сошлось.                        */
+  function aiLogMatching(want) {
+    var log = aiLogEl();
+    if (!log || !want || !want.length) return null;
+    var left = matchingLeft();
+
+    var box = document.createElement('div');
+    box.className = 'sgx-ai-msg sgx-ai-opts';
+    want.forEach(function (t, i) {
+      var row = document.createElement('div');
+      row.className = 'sgx-ai-opt on';
+      var txt = document.createElement('span');
+      txt.className = 'sgx-ai-opttext';
+      txt.textContent = (left[i] ? left[i] + '  →  ' : '') + t;
+      row.appendChild(txt);
+      box.appendChild(row);
+    });
+    var note = document.createElement('div');
+    note.className = 'sgx-ai-optnote';
+    note.textContent = 'Расставил значения напротив подписей.';
+    box.appendChild(note);
+
+    log.appendChild(aiRow(box, aiAnswer && aiAnswer.model));
+    log.scrollTop = log.scrollHeight;
+    return box;
+  }
+
   /* Показать готовое решение в ленте. Никаких подписей «свой ключ» и названий
      моделей: это служебные подробности скрипта, человеку их знать не нужно,
      а ленту они засоряют. Модель и так видна в шапке блока.                    */
@@ -3806,6 +3941,11 @@ async function jobCollect(ctx, target) {
     if (aiAnswer.kind === 'choice') {
       var picked = choiceFromText(aiAnswer.text);
       if (aiLogChoice(picked)) return;
+    }
+    /* Сопоставление: показываем пары, а не голый список значений. */
+    if (aiAnswer.kind === 'matching') {
+      var order = matchingFromText(aiAnswer.text);
+      if (aiLogMatching(order)) return;
     }
     /* под логотипом именно той модели, что ответила: человек мог переключить
        модель после ответа, и подпись не должна ему врать                        */
@@ -4474,6 +4614,7 @@ async function jobCollect(ctx, target) {
   /* есть ли на шаге куда вставлять вообще */
   function stepHasInput() {
     return !!($('.CodeMirror') || $('.cm-content') || $('.quiz-component input') ||
+      $('.matching-quiz') ||
       $('.attempt-wrapper__plugin textarea') || $('.attempt-wrapper__plugin input[type="text"]'));
   }
 
