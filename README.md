@@ -5,7 +5,7 @@
 **Юзерскрипт для stepik.org.** Сам сохраняет зачтённые ответы, вставляет их одним нажатием
 и решает задания, которых ещё нет в общей папке.
 
-[![version](https://img.shields.io/badge/version-6.19.0-blue?style=flat-square)](stepik-gist-sync.user.js)
+[![version](https://img.shields.io/badge/version-6.20.0-blue?style=flat-square)](stepik-gist-sync.user.js)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-нужен-orange?style=flat-square)](https://www.tampermonkey.net/)
 [![stepik.org](https://img.shields.io/badge/stepik.org-работает-2ea44f?style=flat-square)](https://stepik.org)
 
@@ -93,6 +93,9 @@ Tampermonkey сам проверяет обновления примерно р�
 «Сопоставьте часть метода с её назначением» — скрипт читает оба столбца, просит ИИ порядок
 и **расставляет значения сам**: в чате видно пары «подпись → значение», а на странице правый
 столбец встаёт на нужные места. Остаётся нажать «Отправить на проверку».
+
+Ответ здесь короткий, поэтому скрипт **не тратит время на медленные модели**: берёт быструю
+и останавливает ожидание через 25 секунд, если сервис не ответил.
 </details>
 
 <details>

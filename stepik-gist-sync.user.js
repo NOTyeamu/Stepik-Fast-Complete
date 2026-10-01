@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.19.0
+// @version      6.20.0
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам: показывает варианты в чате кружками или квадратами, отмечает нужные, а при отказе проверки берёт другой вариант. Задания со свободным ответом в поле тоже решаются. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Запросы идут через прокси, а ключ доступа живёт только на сервере — в браузер он не попадает вообще. Расход ограничен суточным лимитом. Свой ключ или свой прокси можно вписать в настройках. Если общий упрётся в лимит, скрипт скажет об этом прямо. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -65,7 +65,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.19.0';
+  var VERSION = '6.20.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -878,9 +878,6 @@
     '#sgx-chip .sgx-act.no:hover{background:#E1E7EE}',
     '#sgx-chip .sgx-act.ai{background:#EEF2FF;color:#3730A3}',
     '#sgx-chip .sgx-act.ai:hover{background:#E0E7FF}',
-    /* «ИИ» в скобе показываем только когда сохранённого ответа нет */
-    '#sgx-chip .sgx-ai-only{display:none}',
-    '#sgx-chip.sgx-no-answer .sgx-ai-only{display:inline}',
     /* --- вспышка вокруг редактора и тост --- */
     '.sgx-flash{position:fixed;z-index:2147482000;pointer-events:none;border-radius:6px;opacity:1;',
     'background:rgba(56,178,113,.28);box-shadow:inset 0 0 0 2px rgba(56,178,113,.5);transition:opacity .4s ease}',
@@ -1179,8 +1176,13 @@
       '<button type="button" class="sgx-act yes">вставить</button>',
       '<span class="sgx-sep">/</span>',
       '<button type="button" class="sgx-act no">нет</button>',
-      '<span class="sgx-sep sgx-ai-only">/</span>',
-      '<button type="button" class="sgx-act ai sgx-ai-only">ИИ</button>',
+      '<span class="sgx-sep">/</span>',
+      /* «ИИ» показываем ВСЕГДА. Раньше кнопка пряталась, когда ответ уже лежал
+         в папке, — и после «Закрыть окно» вернуть блок было нечем: скоба
+         предлагала только «вставить» и «нет». Это и была жалоба «закрыл и не
+         могу открыть заново». Теперь кнопка есть всегда: если решение для шага
+         уже есть, она открывает блок, иначе спрашивает ИИ.                    */
+      '<button type="button" class="sgx-act ai">ИИ</button>',
       '</span>',
       '</div>'
     ].join('');
@@ -2315,12 +2317,29 @@ async function jobCollect(ctx, target) {
      выбранная молчит, шанс всё равно остаётся. Больше двух не берём: каталог
      моделей длинный, и на сбое сервиса перебор всех подряд превращался в восемь
      попыток с паузами — человек ждал минуту вместо внятной ошибки.            */
-  function modelsFor(ch) {
+  function modelsFor(ch, preferred) {
     var all = (ch && ch.models) || [];
+    /* Для сопоставления ответ короткий и строго форматированный. Reasoning-модели
+       могут тратить минуты на размышления; берём одну быструю модель и не
+       перебираем остальные. */
+    if (preferred && all.indexOf(preferred) >= 0) return [preferred];
     var want = aiModel();
     if (all.indexOf(want) < 0) return all.slice(0, 2);
     var rest = all.filter(function (m) { return m !== want; });
     return [want].concat(rest.slice(0, 1));
+  }
+
+  function aiModeForKind(kind, retry) {
+    if (kind === 'matching') {
+      return {
+        retry: false,
+        modelId: 'glm-5.3-flash',
+        timeoutMs: 25000,
+        maxTokens: 512,
+        temperature: 0
+      };
+    }
+    return { retry: retry !== false };
   }
 
   /* Пауза между запросами к своему каналу — чтобы не долбить сервис в цикле. */
@@ -3017,22 +3036,26 @@ async function jobCollect(ctx, target) {
     var tries = retry ? AI_TRIES : 1;
     var key = ch.needKey ? aiKey() : '';
     var lastErr = null;
-    var list = modelsFor(ch);
+    var list = modelsFor(ch, mode && mode.modelId);
+    var timeoutMs = Number(mode && mode.timeoutMs) || AI_TIMEOUT;
     for (var i = 0; i < list.length; i++) {
       var model = list[i];
       for (var attempt = 0; attempt < tries; attempt++) {
-        /* Свой таймер на попытку: без него зависший запрос висит бесконечно,
-           и «ИИ думает» можно смотреть сколько угодно.                          */
+        /* Таймаут можно уменьшить для простых структурированных ответов —
+           сопоставление не должно висеть столько же, сколько кодовая задача. */
         var ctrl = null, timer = null;
         if (typeof AbortController === 'function') {
           ctrl = new AbortController();
-          timer = setTimeout(function () { try { ctrl.abort(); } catch (e) { /* ignore */ } }, AI_TIMEOUT);
+          timer = setTimeout(function () { try { ctrl.abort(); } catch (e) { /* ignore */ } }, timeoutMs);
         }
         try {
+          var body = ch.body(model, system || aiSystem(stepKindNow()), user || aiUser(ctx));
+          if (mode && Number(mode.maxTokens) > 0) body.max_tokens = Number(mode.maxTokens);
+          if (mode && typeof mode.temperature === 'number') body.temperature = mode.temperature;
           var opts = {
             method: 'POST',
             headers: ch.headers(key),
-            body: JSON.stringify(ch.body(model, system || aiSystem(stepKindNow()), user || aiUser(ctx)))
+            body: JSON.stringify(body)
           };
           if (ctrl) opts.signal = ctrl.signal;
           var res = await fetch(chUrl(ch), opts);
@@ -3087,7 +3110,7 @@ async function jobCollect(ctx, target) {
         } catch (e) {
           /* Прервали по таймауту — объясняем понятно, а не «signal is aborted». */
           lastErr = (e && (e.name === 'AbortError' || /abort/i.test(e.message || '')))
-            ? new Error('сервис ИИ не ответил за ' + Math.round(AI_TIMEOUT / 1000) + ' с · ' + model)
+            ? new Error('сервис ИИ не ответил за ' + Math.round(timeoutMs / 1000) + ' с · ' + model)
             : e;
           if (retry) await sleep(700);
         } finally {
@@ -3156,8 +3179,15 @@ async function jobCollect(ctx, target) {
     }
 
     var kind = stepKindNow();
+    var thinkLabel = kind === 'matching' ? 'ИИ сопоставляет значения…'
+      : (fixed ? 'ИИ ищет ошибку в тесте…' : 'ИИ пишет решение…');
+    var thinkSlow = kind === 'matching'
+      ? 'Сопоставление занимает дольше обычного — остановлю через 25 с'
+      : 'сервис отвечает медленно';
     aiBusy = true;
-    setStatus('ИИ думает над шагом ' + ctx.step + '…');
+    setStatus(kind === 'matching'
+      ? 'ИИ быстро сопоставляет значения в задании…'
+      : 'ИИ думает над шагом ' + ctx.step + '…');
     setSiteProgress(0.5);
     /* Показываем блок и ленту: человек должен видеть, что происходит, а не гадать */
     aiShow(true);
@@ -3166,13 +3196,13 @@ async function jobCollect(ctx, target) {
       /* Живая реплика вместо «шаг 8 · Python»: язык и так виден в интерфейсе
          Stepik, а человеку нужен понятный ход разговора.                       */
       aiLogAdd('Шаг ' + ctx.step + '. Берусь за задание.', 'sys');
+      if (kind === 'matching') {
+        aiLogAdd('Для сопоставления возьму быструю модель — ответ должен быть списком пар.', 'sys');
+      }
     }
     /* В индикаторе — короткая строка о том, чем ИИ занят СЕЙЧАС. Общие
-       «думает…» ничего не говорят: человек должен видеть, что происходит
-       именно с его шагом. Одна строка, без подробностей.                      */
-    var thinking = aiLogThink(fixed
-      ? 'ИИ ищет ошибку в тесте…'
-      : 'ИИ пишет решение…');
+       «думает…» ничего не говорят: человек должен видеть, что происходит. */
+    var thinking = aiLogThink(thinkLabel, thinkSlow, kind === 'matching' ? 15 : 20);
 
     /* Только теперь выдерживаем паузу между запросами: «думает» уже на экране,
        значит клик виден сразу, а не через секунду тишины.                      */
@@ -3181,7 +3211,8 @@ async function jobCollect(ctx, target) {
     try {
       /* Вид задания берём со страницы: у теста с выбором и у кода разные и
          системный текст, и запрос — иначе модель писала код там, где нужна галочка. */
-      var got = await aiCall(aiSystem(stepKindNow()), aiUserFor(ctx), { retry: !fixed });
+      var got = await aiCall(aiSystem(kind), aiUserFor(ctx, kind),
+        aiModeForKind(kind, !fixed));
 
       /* Пока модель думала, человек мог уйти на другое задание. Тогда ответ
          относится к прошлому шагу, и показывать его в ленте нового нельзя:
@@ -3765,7 +3796,7 @@ async function jobCollect(ctx, target) {
   /* индикатор «думает» — чтобы было видно, что скрипт жив, а не завис.
      Со счётчиком секунд: «думает» без цифр выглядит одинаково и на второй
      секунде, и на второй минуте, и человек не понимает, идёт работа или нет.   */
-  function aiLogThink(label) {
+  function aiLogThink(label, slowLabel, slowAt) {
     var log = aiLogEl();
     if (!log) return null;
     var el = document.createElement('div');
@@ -3780,12 +3811,16 @@ async function jobCollect(ctx, target) {
 
     var started = Date.now();
     var secs = el.querySelector('.sgx-ai-secs');
+    var noteAt = Number(slowAt) > 0 ? Number(slowAt) : 20;
+    var noted = false;
     row.__sgxTimer = setInterval(function () {
       if (!row.parentNode) { clearInterval(row.__sgxTimer); return; }
       var s = Math.round((Date.now() - started) / 1000);
       if (secs) secs.textContent = s + ' с';
-      /* если ответ идёт долго — прямо говорим, что ждём сервис, а не «висим» */
-      if (s === 20 && secs) secs.textContent = s + ' с — сервис отвечает медленно';
+      if (!noted && s >= noteAt && secs) {
+        secs.textContent = slowLabel || (s + ' с — сервис отвечает медленно');
+        noted = true;
+      }
     }, 1000);
     return row;
   }
