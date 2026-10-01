@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stepik ⇄ Gist — автосохранение и вставка ответов
 // @namespace    stepik-gist-sync
-// @version      6.17.0
+// @version      6.18.0
 // @description  Зачтённые ответы Stepik (код и тесты с выбором варианта) автоматически уезжают в общую папку answers/ этого репозитория. Ответ берётся из API самого Stepik, поэтому вёрстка и редактор ни на что не влияют. На шаге, где решение уже сохранено, справа от карточки появляется скоба «вставить / нет». Кнопка рядом с полноэкранным режимом открывает панель прямо в боковом меню курса — в стиле самого Stepik. Панель умеет пройти задания пачкой и собрать их в Word со скриншотами. Там, где ответа ещё нет, решение подскажет ИИ: прямо в карточке задания, рядом с редактором кода, светлым блоком в стиле соседних панелей и на одной шкале размеров, без ```-обёрток, с учётом уровня урока, с самопроверкой по тестовым данным и выбором модели. Готовое решение скрипт сам печатает в редакторе построчно, нажимает «Запустить код» и показывает вывод запуска прямо в ленте (отправку на проверку — никогда). Лента выглядит как чат: логотип отвечающей модели и живые реплики. Тесты с выбором скрипт решает сам: показывает варианты в чате кружками или квадратами, отмечает нужные, а при отказе проверки берёт другой вариант. Задания со свободным ответом в поле тоже решаются. При переходе на новое задание блок ИИ сбрасывается и сразу берётся за новое. Запросы идут через прокси, а ключ доступа живёт только на сервере — в браузер он не попадает вообще. Расход ограничен суточным лимитом. Свой ключ или свой прокси можно вписать в настройках. Если общий упрётся в лимит, скрипт скажет об этом прямо. Модель выбирается списком с логотипом и уровнем «ума»: от быстрой glm-5.3-flash до заточенной под код kimi-k2.7-code и сильной deepseek-v4-pro, у каждой свой лимит ответа. Размышления reasoning-моделей отрезаются от решения, обрезанный по лимиту ответ помечается и не уезжает в общее хранилище. Проваленные тесты в отчёте выделены красным. Если тесты не прошли — ИИ прочитает ошибку, сам вернёт редактор кнопкой «Изменить решение» и попробует исправить: решение пишется только тем, что уже было в уроке, без import и лишних конструкций.
 // @author       NOTyeamu
 // @match        *://stepik.org/*
@@ -65,7 +65,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '6.17.0';
+  var VERSION = '6.18.0';
 
   /* Репозиторий с ответами */
   var REPO = 'NOTyeamu/Stepik-Fast-Complete';
@@ -972,28 +972,42 @@
     '#sgx-ai-panel .sgx-ai-repline.bad{color:#B3261E;font-weight:600}',
     '#sgx-ai-panel .sgx-ai-repline.ok{color:#2C6B3C}',
     '#sgx-ai-panel .sgx-ai-repline.note{color:#6B6A67}',
-    /* варианты теста в чате: та же плашка, что и у кода, метки зелёные —
-       круг, если ответ один, квадрат, если верных несколько. Заполнение
-       стоит по центру, а не заливает метку целиком.                            */
+    /* Варианты теста в чате — та же плашка, что и у кода. Сами метки рисуем
+       классами Stepik (s-checkbox / s-radio), поэтому галочка и кружок выглядят
+       ровно как в задании. Здесь только отступы и выделение выбранного.        */
     '#sgx-ai-panel .sgx-ai-opts{display:flex;flex-direction:column;gap:var(--sgx-s2);',
     'padding:var(--sgx-s3) var(--sgx-s4);border-radius:var(--sgx-r-sm);background:#F7F7F6;',
     'border:1px solid #ECECEA}',
-    '#sgx-ai-panel .sgx-ai-opt{display:flex;align-items:flex-start;gap:var(--sgx-s2);',
-    'font-size:var(--sgx-f-sm);color:#4B4A47}',
-    '#sgx-ai-panel .sgx-ai-mark{flex:0 0 auto;position:relative;width:18px;height:18px;margin-top:1px;',
-    'border:2px solid #A9C6A9;background:#fff}',
-    '#sgx-ai-panel .sgx-ai-mark.circle{border-radius:50%}',
-    '#sgx-ai-panel .sgx-ai-mark.box{border-radius:4px}',
-    '#sgx-ai-panel .sgx-ai-opt.on{color:#1F1D1B;font-weight:600}',
-    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark{border-color:#2E7D32}',
-    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.circle::after{content:"";position:absolute;inset:4px;',
-    'border-radius:50%;background:#2E7D32}',
-    /* Квадрат заливаем ЦЕЛИКОМ: маленький квадратик внутри читался как «не
-       нажато». Круг оставляем точкой по центру — там так и должно быть.      */
-    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.box{background:#2E7D32;border-color:#2E7D32}',
-    '#sgx-ai-panel .sgx-ai-opt.on .sgx-ai-mark.box::after{content:"";position:absolute;inset:0;',
-    'border-radius:2px;background:#2E7D32}',
+    '#sgx-ai-panel .sgx-ai-opt{display:flex;align-items:flex-start;font-size:var(--sgx-f-sm);',
+    'color:#4B4A47}',
+    /* метку не трогаем руками: показываем ровно то, что выбрано */
+    '#sgx-ai-panel .sgx-ai-opt input{pointer-events:none}',
+    '#sgx-ai-panel .sgx-ai-opt.on{color:#1F1D1B}',
+    '#sgx-ai-panel .sgx-ai-opt.on .s-checkbox__label,',
+    '#sgx-ai-panel .sgx-ai-opt.on .s-radio__label{font-weight:600;color:#1F1D1B}',
     '#sgx-ai-panel .sgx-ai-optnote{margin-top:2px;font-size:var(--sgx-f-xs);color:var(--sgx-fg-dim)}',
+    /* Запасной вариант на случай, если стили Stepik до блока не достают.
+       Специфичность нулевая (:where), поэтому их правила всегда важнее — наши
+       включаются только тогда, когда рисовать метку больше нечем.              */
+    ':where(#sgx-ai-panel) :where(.s-checkbox, .s-radio){display:flex;align-items:flex-start;',
+    'gap:8px;cursor:default}',
+    ':where(#sgx-ai-panel) :where(.s-checkbox__input, .s-radio__input){position:absolute;',
+    'opacity:0;width:0;height:0}',
+    ':where(#sgx-ai-panel) :where(.s-checkbox__border, .s-radio__border){flex:0 0 auto;',
+    'position:relative;width:18px;height:18px;margin-top:1px;border:2px solid #B4B2A9;background:#fff}',
+    ':where(#sgx-ai-panel) :where(.s-radio__border){border-radius:50%}',
+    ':where(#sgx-ai-panel) :where(.s-checkbox__border){border-radius:4px}',
+    ':where(#sgx-ai-panel) :where(.s-checkbox__circle, .s-radio__circle){position:absolute;inset:0}',
+    ':where(#sgx-ai-panel) :where(.s-radio__input:checked ~ .s-radio__border)',
+    '{border-color:#2E7D32}',
+    ':where(#sgx-ai-panel) :where(.s-radio__input:checked ~ .s-radio__border .s-radio__circle)',
+    '{margin:3px;border-radius:50%;background:#2E7D32}',
+    ':where(#sgx-ai-panel) :where(.s-checkbox__input:checked ~ .s-checkbox__border)',
+    '{border-color:#2E7D32;background:#2E7D32}',
+    /* галочка: без неё пустой зелёный квадрат читается как «залито непонятно чем» */
+    ':where(#sgx-ai-panel) :where(.s-checkbox__input:checked ~ .s-checkbox__border .s-checkbox__circle)',
+    '{position:absolute;left:5px;top:1px;width:5px;height:10px;border:solid #fff;',
+    'border-width:0 2px 2px 0;transform:rotate(45deg)}',
     /* нижняя полоса блока: главное действие — спросить ИИ */
     '#sgx-ai-panel .sgx-ai-foot{display:flex;padding:var(--sgx-s3) var(--sgx-s4);',
     'border-top:1px solid var(--sgx-bd);background:#fff}',
@@ -2672,8 +2686,12 @@ async function jobCollect(ctx, target) {
 
   /* Запрос собираем от ctx, а не «от страницы»: при исправлении нужно то же самое
      условие, что ушло в первый раз, иначе модель начнёт решать другую задачу. */
-  function aiUserFor(ctx) {
-    var kind = stepKindNow();
+  /* Вид задания можно передать явно. При правке это обязательно: после провала
+     Stepik может убрать карточку задания со страницы, и определённый по ней вид
+     окажется не тем — запрос уйдёт как «свободный ответ» вместо теста, без
+     списка вариантов и без прошлых попыток.                                    */
+  function aiUserFor(ctx, kindIn) {
+    var kind = kindIn || stepKindNow();
     var lang = stepLanguage();
     var task = stepPrompt();
 
@@ -2683,7 +2701,8 @@ async function jobCollect(ctx, target) {
       var opts = choiceOptions();
       var list = opts.map(function (o) { return o.n + ') ' + o.text; }).join('\n');
       var ask = 'Задание — тест. Выбери верный вариант и верни ТОЛЬКО его текст, ' +
-        'ровно как в списке, без номера и без пояснений.';
+        'ровно как в списке, без номера и без пояснений. Если дословно скопировать ' +
+        'не получается, верни только номер варианта.';
       var base = aiLessonBlock() + '\n' + ask + '\n\nВопрос:\n' + task;
       if (list) base += '\n\nВарианты ответа:\n' + list;
       /* Прошлые попытки: без этого модель упрямо возвращает тот же вариант, и
@@ -3070,6 +3089,9 @@ async function jobCollect(ctx, target) {
       /* Новый ответ — новые попытки правки: лимит правок считается на ответ,
          а не на шаг, иначе после двух неудач скрипт молчал бы до перезагрузки. */
       delete aiFixTried[ctx.key];
+      /* И сразу запоминаем выбранные варианты: если ответ не примется, в запросе
+         на исправление должны быть перечислены прошлые попытки.                 */
+      if (kind === 'choice') rememberTriedChoice(ctx, clean);
       dropThink(thinking);
       saveAi();
       renderPanel(true);
@@ -3115,6 +3137,20 @@ async function jobCollect(ctx, target) {
   /* ключ шага → варианты, которые уже отправляли и которые не подошли: при
      повторной попытке просим ДРУГОЙ вариант, а не тот же самый                  */
   var aiTriedChoices = {};
+
+  /* Запоминаем варианты, которые ИИ уже выбрал. Зовём это СРАЗУ при получении
+     ответа, а не только при вставке: вставка асинхронная и может опоздать —
+     тогда в запрос на исправление список прошлых попыток не попадал, и модель
+     возвращала тот же самый вариант.                                          */
+  function rememberTriedChoice(ctx, text) {
+    if (!ctx || !ctx.key) return;
+    var picked = choiceFromText(text);
+    if (!picked || !picked.answers.length) return;
+    var tried = aiTriedChoices[ctx.key] || (aiTriedChoices[ctx.key] = []);
+    picked.answers.forEach(function (t) {
+      if (tried.indexOf(t) < 0) tried.push(t);
+    });
+  }
   var AI_FIX_MARKS = 2;                 /* столько правок на один шаг */
 
   async function aiSelfCorrect(ctx) {
@@ -3135,6 +3171,10 @@ async function jobCollect(ctx, target) {
     var prev = aiAnswer.text;
     aiLogReport(err);
     aiLogAdd('Проверка не прошла. Смотрю, что не так, и исправляю.', 'sys');
+    /* Дальше ИИ думает заново — и это должно быть видно так же, как в начале
+       разговора: иначе после этой строки в чате наступает тишина, и кажется,
+       что скрипт остановился.                                                */
+    var fixThink = aiLogThink('ИИ ищет ошибку…');
 
     var fixCtx = Object.assign({}, ctx);
     try { fixCtx.prevCode = await lastSubmissionCode(); } catch (e) { fixCtx.prevCode = prev; }
@@ -3145,11 +3185,13 @@ async function jobCollect(ctx, target) {
       /* При правке вид берём из прошлого ответа: после провала Stepik может
          спрятать редактор, и по странице вид уже не определить.                 */
       var fixKind = (aiAnswer && aiAnswer.kind) || stepKindNow();
-      got = await aiCall(aiSystem(fixKind), aiUserFor(fixCtx), { retry: false });
+      got = await aiCall(aiSystem(fixKind), aiUserFor(fixCtx, fixKind), { retry: false });
     } catch (e) {
+      dropThink(fixThink);
       aiLogAdd('Исправить не получилось: ' + e.message, 'err');
       return { skipped: 'ошибка канала: ' + e.message };
     }
+    dropThink(fixThink);
 
     aiAnswer = {
       key: ctx.key, text: stripFences(got.text) || got.text, at: Date.now(), model: got.model,
@@ -3157,6 +3199,7 @@ async function jobCollect(ctx, target) {
       truncated: !!got.truncated
     };
     saveAi();
+    if (aiAnswer.kind === 'choice') rememberTriedChoice(ctx, aiAnswer.text);
     aiLogAnswer();
     renderPanel(true);
 
@@ -3276,7 +3319,10 @@ async function jobCollect(ctx, target) {
      вставлять исправленный код некуда: скрипт честно писал «вставить некуда»
      и «кнопку «Запустить код» не нашёл», хотя дело было именно в скрытом
      редакторе.                                                                 */
-  var EDIT_RE = /^(?:изменить решение|изменить|редактировать|изменить ответ|edit solution|edit|rework)$/i;
+  /* Кнопка возврата к заданию. У кода это «Изменить решение», у теста с выбором —
+     «Начать сначала» или «Решить снова»: без них после провала варианты со
+     страницы исчезают, и повторно отметить ответ было негде.                   */
+  var EDIT_RE = /^(?:изменить решение|изменить|редактировать|изменить ответ|начать сначала|начать заново|решить снова|решить заново|пройти заново|попробовать снова|попробовать ещё раз|попробовать еще раз|edit solution|edit|rework|retry|try again)$/i;
 
   function editButton() {
     var nodes = $$('button, [role="button"]');
@@ -3355,10 +3401,7 @@ async function jobCollect(ctx, target) {
       }
       /* Запоминаем, что уже отправляли: при провале попросим ДРУГОЙ вариант,
          иначе модель вернёт тот же и человек получит ту же ошибку.            */
-      var tried = aiTriedChoices[ctx.key] || (aiTriedChoices[ctx.key] = []);
-      (picked.answers || []).forEach(function (t) {
-        if (tried.indexOf(t) < 0) tried.push(t);
-      });
+      rememberTriedChoice(ctx, aiAnswer.text);
       aiLogAdd('Отметил вариант ответа. Осталось нажать «Отправить на проверку».', 'sys');
       if (target) flash(target.anchor);
       /* У теста с выбором запускать нечего: там нет ни редактора, ни кнопки
@@ -3693,20 +3736,52 @@ async function jobCollect(ctx, target) {
     var wantIds = ((picked && picked.ids) || []).map(String);
     var wantTxt = ((picked && picked.answers) || []).map(norm);
 
+    /* Метки рисуем ТЕМИ ЖЕ классами, что и Stepik на странице: тогда галочка,
+       кружок и нажатое состояние выглядят ровно как в задании, без самодельных
+       квадратиков. Своя разметка была похожа, но не совпадала — на это и была
+       жалоба.                                                                 */
+    var K = multiple
+      ? { wrap: 's-checkbox', input: 's-checkbox__input', border: 's-checkbox__border',
+        circle: 's-checkbox__circle', label: 's-checkbox__label', type: 'checkbox' }
+      : { wrap: 's-radio', input: 's-radio__input', border: 's-radio__border',
+        circle: 's-radio__circle', label: 's-radio__label', type: 'radio' };
+
     var box = document.createElement('div');
     box.className = 'sgx-ai-msg sgx-ai-opts';
     opts.forEach(function (o) {
       var on = wantIds.indexOf(String(o.id)) >= 0 ||
         (wantTxt.length > 0 && wantTxt.indexOf(norm(o.text)) >= 0);
+
+      /* Обёртка — div, а не label: внутри label клик по тексту переключал бы
+         галочку, и в чате показывалось бы не то, что выбрано на самом деле.    */
       var row = document.createElement('div');
       row.className = 'sgx-ai-opt' + (on ? ' on' : '');
-      var mark = document.createElement('span');
-      mark.className = 'sgx-ai-mark ' + (multiple ? 'box' : 'circle');
-      row.appendChild(mark);
+
+      var mark = document.createElement('div');
+      mark.className = K.wrap;
+
+      var inp = document.createElement('input');
+      inp.className = K.input;
+      inp.type = K.type;
+      /* checked без disabled: отключённое поле браузер рисует блёклым, а нужен
+         обычный вид. Нажимать нельзя — на поле стоит pointer-events:none.      */
+      if (on) inp.checked = true;
+      inp.tabIndex = -1;
+      mark.appendChild(inp);
+
+      var border = document.createElement('span');
+      border.className = K.border;
+      var dot = document.createElement('span');
+      dot.className = K.circle;
+      border.appendChild(dot);
+      mark.appendChild(border);
+
       var txt = document.createElement('span');
-      txt.className = 'sgx-ai-opttext';
+      txt.className = 'choice-quiz-show__option ' + K.label;
       txt.textContent = o.text;
-      row.appendChild(txt);
+      mark.appendChild(txt);
+
+      row.appendChild(mark);
       box.appendChild(row);
     });
     var note = document.createElement('div');
