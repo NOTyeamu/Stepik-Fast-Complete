@@ -5,7 +5,7 @@
 **Юзерскрипт для stepik.org.** Сам сохраняет зачтённые ответы, вставляет их одним нажатием
 и решает задания, которых ещё нет в общей папке.
 
-[![version](https://img.shields.io/badge/version-6.22.0-blue?style=flat-square)](stepik-gist-sync.user.js)
+[![version](https://img.shields.io/badge/version-6.23.0-blue?style=flat-square)](stepik-gist-sync.user.js)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-нужен-orange?style=flat-square)](https://www.tampermonkey.net/)
 [![stepik.org](https://img.shields.io/badge/stepik.org-работает-2ea44f?style=flat-square)](https://stepik.org)
 
@@ -34,6 +34,7 @@
 
 При первом запуске скрипт предложит короткое **знакомство**: покажет, где панель заданий,
 где скоба с готовым ответом и где чат с ИИ. Можно пропустить — тогда он больше не спросит.
+Посмотреть ещё раз: **панель → Настройки → «Показать знакомство заново»**.
 
 <details>
 <summary><b>Как обновить скрипт</b></summary>
