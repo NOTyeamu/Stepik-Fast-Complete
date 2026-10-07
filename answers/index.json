@@ -808,5 +808,10 @@
   "file": "l1812984_s4.txt",
   "ext": "txt",
   "kind": "code"
+ },
+ "l1812984_s5": {
+  "file": "l1812984_s5.json",
+  "ext": "json",
+  "kind": "choice"
  }
 }
