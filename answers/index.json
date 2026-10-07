@@ -818,5 +818,10 @@
   "file": "l1813056_s2.json",
   "ext": "json",
   "kind": "choice"
+ },
+ "l1813056_s3": {
+  "file": "l1813056_s3.json",
+  "ext": "json",
+  "kind": "choice"
  }
 }
