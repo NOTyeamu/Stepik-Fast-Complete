@@ -774,6 +774,11 @@
   "ext": "json",
   "kind": "choice"
  },
+ "l1812982_s5": {
+  "file": "l1812982_s5.json",
+  "ext": "json",
+  "kind": "choice"
+ },
  "l1812982_s9": {
   "file": "l1812982_s9.txt",
   "ext": "txt",
