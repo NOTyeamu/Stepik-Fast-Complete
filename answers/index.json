@@ -914,6 +914,11 @@
   "ext": "json",
   "kind": "choice"
  },
+ "l85652_s8": {
+  "file": "l85652_s8.txt",
+  "ext": "txt",
+  "kind": "code"
+ },
  "l90030_s8": {
   "file": "l90030_s8.json",
   "ext": "json",
