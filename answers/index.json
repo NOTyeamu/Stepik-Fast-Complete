@@ -993,5 +993,15 @@
   "file": "l90034_s5.json",
   "ext": "json",
   "kind": "choice"
+ },
+ "l90034_s7": {
+  "file": "l90034_s7.json",
+  "ext": "json",
+  "kind": "choice"
+ },
+ "l90034_s8": {
+  "file": "l90034_s8.json",
+  "ext": "json",
+  "kind": "choice"
  }
 }
