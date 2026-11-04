@@ -869,6 +869,11 @@
   "ext": "json",
   "kind": "choice"
  },
+ "l77290_s4": {
+  "file": "l77290_s4.json",
+  "ext": "json",
+  "kind": "choice"
+ },
  "l77300_s4": {
   "file": "l77300_s4.txt",
   "ext": "txt",
