@@ -933,5 +933,10 @@
   "file": "l90032_s5.json",
   "ext": "json",
   "kind": "choice"
+ },
+ "l90032_s6": {
+  "file": "l90032_s6.json",
+  "ext": "json",
+  "kind": "choice"
  }
 }
