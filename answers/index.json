@@ -889,6 +889,11 @@
   "ext": "json",
   "kind": "choice"
  },
+ "l77303_s4": {
+  "file": "l77303_s4.json",
+  "ext": "json",
+  "kind": "choice"
+ },
  "l85650_s8": {
   "file": "l85650_s8.json",
   "ext": "json",
