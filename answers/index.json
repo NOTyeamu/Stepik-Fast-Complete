@@ -874,6 +874,11 @@
   "ext": "json",
   "kind": "choice"
  },
+ "l77302_s12": {
+  "file": "l77302_s12.json",
+  "ext": "json",
+  "kind": "choice"
+ },
  "l77302_s9": {
   "file": "l77302_s9.json",
   "ext": "json",
