@@ -964,6 +964,16 @@
   "ext": "json",
   "kind": "choice"
  },
+ "l88727_s12": {
+  "file": "l88727_s12.json",
+  "ext": "json",
+  "kind": "choice"
+ },
+ "l88727_s9": {
+  "file": "l88727_s9.txt",
+  "ext": "txt",
+  "kind": "code"
+ },
  "l90030_s8": {
   "file": "l90030_s8.json",
   "ext": "json",
