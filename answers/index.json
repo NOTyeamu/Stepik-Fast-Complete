@@ -868,5 +868,10 @@
   "file": "l77300_s6.json",
   "ext": "json",
   "kind": "choice"
+ },
+ "l77300_s8": {
+  "file": "l77300_s8.json",
+  "ext": "json",
+  "kind": "choice"
  }
 }
